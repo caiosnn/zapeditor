@@ -1,0 +1,3 @@
+# Dependência Python para timestamp por palavra (legenda) e vídeos longos.
+# Instale com:  pip install -r requirements.txt
+faster-whisper

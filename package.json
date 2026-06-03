@@ -1,0 +1,18 @@
+{
+  "name": "bot-transcricao-whatsapp",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp que transcreve vídeos e áudios em grupos usando modelos multimodais via OpenRouter",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "dotenv": "^16.4.7",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

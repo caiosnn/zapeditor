@@ -1,0 +1,15 @@
+node_modules/
+auth/
+.env
+*.log
+data/
+qr.png
+
+# artefatos de render / transientes
+caption-studio/public/input.mp4
+caption-studio/public/input.json
+caption-studio/public/dims.json
+caption-studio/public/sample-video.mp4
+caption-studio/out/
+poc_remotion.mp4
+poc_legenda_compacto.mp4
