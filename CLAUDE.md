@@ -9,17 +9,20 @@ Arquitetura e features completas: ver **[README.md](README.md)**. Este arquivo �
 - Windows + PowerShell. ffmpeg/ffprobe e Python 3 (faster-whisper) no PATH.
 - APIs externas: usar sempre **OpenRouter** (chave no `.env`, `OPENROUTER_API_KEY`).
 
-## Rodar / reiniciar o bot
-O bot roda em **background** e fica conectado entre turnos. Para aplicar mudanças em `src/*.js`, **reinicie**:
+## Rodar / reiniciar o bot (gerenciado por PM2)
+O bot roda **24/7 via PM2** (nome `zapeditor`), independente desta sessão, com auto-restart em crash e auto-boot no logon do Windows.
 ```powershell
-# parar
-Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*src/index.js*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-# iniciar (use run_in_background=true na tool)
-npm start
+pm2 restart zapeditor              # aplicar mudanças em src/*.js
+pm2 logs zapeditor --lines 40 --nostream   # ver logs (use --nostream p/ não travar)
+pm2 status                         # estado
+pm2 stop zapeditor / pm2 start zapeditor
 ```
-Reconecta sem QR (sessão em `auth/`). Confirme no output do background: `Bot conectado`. O `failed 255` ao parar é normal.
+⚠️ **NÃO** use `npm start` nem mate o node manualmente enquanto o PM2 estiver rodando — daria DUAS instâncias e o WhatsApp dá conflito (`conflict: replaced` em loop). Sempre via PM2. Reconecta sem QR (sessão em `auth/`).
 
-Mudanças em `caption-studio/` (Remotion) **não** precisam reiniciar o bot — pegam no próximo render (re-bundle).
+Mudanças em `caption-studio/` (Remotion) **não** precisam reiniciar — pegam no próximo render.
+
+## Git
+Repositório: `https://github.com/caiosnn/zapeditor.git` (branch `main`). `gh` autenticado como `caiosnn`. Commit normalmente quando o usuário pedir.
 
 ## Testar a legenda sem o WhatsApp
 `_poc_remotion.mjs` roda o pipeline no vídeo de referência e gera `poc_remotion.mp4`. Depois:
