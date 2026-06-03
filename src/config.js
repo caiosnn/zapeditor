@@ -41,9 +41,13 @@ export const config = {
   // Caminhos dos binários (auto-detectados no PATH se vazios). yt-dlp baixa vídeo; gallery-dl, foto.
   ytDlpPath: process.env.YTDLP_PATH?.trim() || '',
   galleryDlPath: process.env.GALLERYDL_PATH?.trim() || '',
-  // Teto de qualidade/tamanho (perfil equilibrado: até 1080p, ~200MB, ~20min).
-  downloadMaxHeight: Number(process.env.DOWNLOAD_MAX_HEIGHT ?? 1080) || 1080,
-  downloadMaxFilesizeMB: Number(process.env.DOWNLOAD_MAX_FILESIZE_MB ?? 200) || 200,
+  // Caminho do ffmpeg (arquivo ou pasta). Vazio = auto-detecta (PATH ou winget). CRÍTICO: sem ele
+  // o yt-dlp não junta vídeo+áudio e cai numa resolução baixa (o PM2 nem sempre tem ffmpeg no PATH).
+  ffmpegLocation: process.env.FFMPEG_LOCATION?.trim() || '',
+  // Qualidade do vídeo: 0 = SEMPRE a maior disponível (sem teto). >0 limita a altura (ex.: 1080).
+  downloadMaxHeight: Number(process.env.DOWNLOAD_MAX_HEIGHT ?? 0) || 0,
+  // Teto de tamanho (generoso p/ alta qualidade) e duração.
+  downloadMaxFilesizeMB: Number(process.env.DOWNLOAD_MAX_FILESIZE_MB ?? 500) || 500,
   downloadMaxDurationSec: Number(process.env.DOWNLOAD_MAX_DURATION_SEC ?? 1200) || 1200,
   // Máximo de arquivos por link (carrossel do Instagram, galeria, etc).
   downloadMaxItems: Number(process.env.DOWNLOAD_MAX_ITEMS ?? 10) || 10,

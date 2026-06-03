@@ -11,7 +11,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, extname, basename } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { config } from './config.js'
 
 // ---- Detecção de URL (pura, testável) -----------------------------------
@@ -104,6 +104,35 @@ function instaloaderCmd() {
   return instaloaderCached
 }
 
+let ffmpegCached
+/**
+ * Acha o ffmpeg (arquivo ou pasta) p/ passar ao yt-dlp via --ffmpeg-location. Sem isso, rodando
+ * via PM2 (que nem sempre tem o ffmpeg no PATH), o yt-dlp não faz o merge e baixa em baixa resolução.
+ * Ordem: override .env -> PATH -> instalação do winget. Devolve '' se não achar (deixa o yt-dlp tentar o PATH).
+ */
+export function resolveFfmpeg() {
+  if (ffmpegCached !== undefined) return ffmpegCached
+  ffmpegCached = (() => {
+    const fromPath = resolvePath('ffmpeg', config.ffmpegLocation)
+    if (fromPath) return fromPath
+    try {
+      const base = join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Packages')
+      const pkg = readdirSync(base).find((d) => /yt-dlp\.FFmpeg/i.test(d))
+      if (pkg) {
+        const inner = readdirSync(join(base, pkg)).find((d) => /^ffmpeg/i.test(d))
+        if (inner) {
+          const bin = join(base, pkg, inner, 'bin')
+          if (existsSync(join(bin, 'ffmpeg.exe'))) return bin
+        }
+      }
+    } catch {
+      /* sem winget */
+    }
+    return ''
+  })()
+  return ffmpegCached
+}
+
 // ---- Autenticação (cookies + sessão do instaloader) ---------------------
 
 /** Flags de cookies p/ yt-dlp e gallery-dl (mesmas flags nos dois). Arquivo tem prioridade. */
@@ -190,13 +219,15 @@ async function collectFiles(dir) {
 
 async function ytdlp(url, dir) {
   const h = config.downloadMaxHeight
+  // h=0 → SEMPRE a maior qualidade (melhor vídeo + melhor áudio, merge); h>0 → limita a altura.
+  const format = h > 0 ? `bv*[height<=${h}]+ba/b[height<=${h}]/b` : 'bv*+ba/b'
   const args = [
     '--no-playlist',
     '--no-warnings',
     '--no-progress',
     '--no-part',
     '-f',
-    `bv*[height<=${h}]+ba/b[height<=${h}]/b`,
+    format,
     '--merge-output-format',
     'mp4',
     '--max-filesize',
@@ -211,8 +242,12 @@ async function ytdlp(url, dir) {
     '--trim-filenames',
     '150',
     ...cookieArgs(),
-    url,
   ]
+  // --ffmpeg-location explícito: garante o merge (vídeo+áudio) em alta resolução mesmo se o
+  // ffmpeg não estiver no PATH do processo (caso do PM2). Sem isso, cai numa resolução baixa.
+  const ff = resolveFfmpeg()
+  if (ff) args.push('--ffmpeg-location', ff)
+  args.push(url)
   const yt = ytdlpCmd()
   return runProc(yt.file, [...yt.pre, ...args], { timeoutMs: 9 * 60_000 })
 }
