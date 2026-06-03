@@ -19,8 +19,15 @@ import { transcribeForCaption, renderCaption } from './caption.js'
 import { applyEdit, parseCorrection, formatTimedText } from './caption-edit.js'
 import { parseSrtBlocks, parseCutRange, cutVideo } from './cut.js'
 import { initCutStore, saveCut, getCut } from './cut-store.js'
+import { consultExpert, isAffirmative, isNegative } from './expert.js'
+import { initExpertStore, appendHistory, setPrefs } from './expert-store.js'
+import { generateImage, generateVideo, estimateCost, downloadBuffer } from './higgsfield.js'
+import { classifyAttachment, archivePath, buildFileName, isDriveRequest, parseDriveDate, dayFolderName } from './archive.js'
+import { ensureArchivePath, uploadStream, folderLink } from './drive.js'
+import { initArchiveStore, wasArchived, markArchived } from './archive-store.js'
 import {
   getMedia,
+  getImage,
   getContextInfo,
   getText,
   unwrap,
@@ -35,6 +42,8 @@ import {
 const pendingCaptions = new Map()
 // último vídeo transcrito por remetente (fallback quando o CORTE não cita a transcrição)
 const senderLatestCut = new Map()
+// gerações de vídeo aguardando confirmação de custo (chave: `${jid}|${sender}`)
+const pendingGenerations = new Map()
 const PENDING_TTL = 30 * 60 * 1000
 
 function pendingKey(jid, sender) {
@@ -45,6 +54,8 @@ const logger = pino({ level: 'warn' })
 
 async function start() {
   await initCutStore()
+  await initExpertStore()
+  await initArchiveStore()
   const { state, saveCreds } = await useMultiFileAuthState('auth')
   const { version } = await fetchLatestBaileysVersion()
 
@@ -82,6 +93,7 @@ async function start() {
       } else {
         console.log('   Transcrevendo automaticamente todo áudio/vídeo recebido.')
       }
+      if (config.archiveDiscover) listGroupsForDiscovery(sock)
     }
 
     if (connection === 'close') {
@@ -110,121 +122,189 @@ async function handleMessage(sock, msg) {
   const jid = msg.key.remoteJid
   if (!jid || jid === 'status@broadcast') return
 
-  // Mensagem de "CORREÇÃO" para um vídeo já legendado? Trata antes de tudo
-  // (sem precisar marcar o bot), pois a palavra-chave já deixa claro.
   const sender = msg.key.participant || jid
-  const pending = pendingCaptions.get(pendingKey(jid, sender))
+  const key = pendingKey(jid, sender)
+  const text = getText(msg.message)
+  const ownMedia = getMedia(msg.message) // áudio/vídeo na própria mensagem
+  const botIds = botIdentifiers(sock)
+  const mentioned = isBotMentioned(msg.message, botIds)
+  const directed = !isGroup(jid) || mentioned // privado sempre; em grupo, só com @
+
+  // 0) ARQUIVAMENTO automático no Drive (grupos configurados). Roda em paralelo ao
+  //    fluxo normal: NÃO dá return, então transcrição/legenda seguem funcionando.
+  if (config.archiveEnabled && isGroup(jid)) {
+    if (config.archiveDiscover) logGroupOnce(sock, jid)
+    if (config.archiveGroups.includes(jid)) {
+      maybeArchive(sock, msg, jid).catch((e) => console.error('Arquivamento falhou:', e?.message || e))
+    }
+  }
+
+  // 1) Confirmação de uma geração de VÍDEO pendente (resposta sim/não).
+  const pgen = pendingGenerations.get(key)
+  if (pgen && !ownMedia && text) {
+    if (Date.now() - pgen.ts > PENDING_TTL) {
+      pendingGenerations.delete(key)
+    } else if (isNegative(text)) {
+      pendingGenerations.delete(key)
+      await sock.sendMessage(jid, { text: '👍 Beleza, cancelei. Quer ajustar algo?' }, { quoted: msg }).catch(() => {})
+      return
+    } else if (isAffirmative(text)) {
+      pendingGenerations.delete(key)
+      await executeGeneration(sock, jid, msg, pgen)
+      return
+    } else {
+      pendingGenerations.delete(key) // não foi sim/não: trata como novo pedido
+    }
+  }
+
+  // 2) CORREÇÃO de uma legenda recém-gerada (palavra-chave, sem mídia).
+  const pending = pendingCaptions.get(key)
   if (pending) {
     if (Date.now() - pending.ts > PENDING_TTL) {
-      pendingCaptions.delete(pendingKey(jid, sender))
-    } else if (!getMedia(msg.message)) {
-      const correction = parseCorrection(getText(msg.message))
+      pendingCaptions.delete(key)
+    } else if (!ownMedia) {
+      const correction = parseCorrection(text)
       if (correction) {
-        pendingCaptions.delete(pendingKey(jid, sender))
+        pendingCaptions.delete(key)
         await handleCorrection(sock, jid, msg, pending, correction)
         return
       }
     }
   }
 
-  // CORTE: responder à mensagem de transcrição + palavra "corte".
-  if (!getMedia(msg.message) && /\bcorte\b|\bcortar\b/i.test(getText(msg.message))) {
+  // 3) CORTE: responder à transcrição + palavra "corte".
+  if (!ownMedia && /\bcorte\b|\bcortar\b/i.test(text)) {
     const quotedId = getContextInfo(msg.message)?.stanzaId
-    const cut = getCut(quotedId) || getCut(senderLatestCut.get(pendingKey(jid, sender)))
+    const cut = getCut(quotedId) || getCut(senderLatestCut.get(key))
     if (cut) {
       await handleCut(sock, jid, msg, cut)
       return
     }
   }
 
-  let target // a mensagem que realmente contém a mídia
-  let media
-
-  if (config.mode === 'mention') {
-    // Em grupo: só age quando MARCAM (@) o bot. No privado: age direto.
-    const botIds = botIdentifiers(sock)
-    const mentioned = isBotMentioned(msg.message, botIds)
-    // [DIAG temporário] ajuda a confirmar a detecção de menção com mensagens reais
-    if (isGroup(jid)) {
-      console.log(
-        `[mention] grupo | marcado=${mentioned} | mentionedJid=${JSON.stringify(
-          getContextInfo(msg.message)?.mentionedJid || []
-        )} | botIds=${JSON.stringify(botIds)}`
-      )
-    }
-    if (isGroup(jid) && !mentioned) return
-
-    // Mídia na própria mensagem (ex.: vídeo com legenda marcando o bot)?
-    media = getMedia(msg.message)
-    if (media) {
-      target = msg
-    } else {
-      // Ou é uma resposta a um áudio/vídeo (marcando o bot)?
-      const ctx = getContextInfo(msg.message)
-      const quoted = ctx?.quotedMessage
-      media = getMedia(quoted)
-      if (!media) {
-        // Só ensina o uso se realmente chamaram o bot (evita ruído no grupo)
-        if (mentioned) {
-          await sock.sendMessage(
-            jid,
-            { text: '🎧 Me marque *respondendo* a um áudio ou vídeo que eu transcrevo!' },
-            { quoted: msg }
-          )
-        }
-        return
-      }
-      target = {
-        key: {
-          remoteJid: jid,
-          id: ctx.stanzaId,
-          participant: ctx.participant,
-          fromMe: botIds.includes(normalizeId(ctx.participant)),
-        },
-        message: quoted,
-      }
-    }
-  } else if (config.mode === 'command') {
-    // Só age quando alguém responde a uma mídia com a palavra-chave
-    const ext = msg.message.extendedTextMessage
-    const text = (ext?.text || '').toLowerCase()
-    if (!text.includes(config.commandTrigger)) return
-
-    const ctx = ext?.contextInfo
-    const quoted = ctx?.quotedMessage
-    media = getMedia(quoted)
-    if (!media) {
-      await sock.sendMessage(
-        jid,
-        { text: `❓ Responda a um *áudio* ou *vídeo* com "${config.commandTrigger}" para eu transcrever.` },
-        { quoted: msg }
-      )
-      return
-    }
-    // Reconstrói a mensagem citada para conseguir baixar a mídia
-    target = {
-      key: {
-        remoteJid: jid,
-        id: ctx.stanzaId,
-        participant: ctx.participant,
-        fromMe: botIdentifiers(sock).includes(normalizeId(ctx.participant)),
-      },
-      message: quoted,
-    }
-  } else {
-    // Modo auto: transcreve qualquer áudio/vídeo recebido
-    media = getMedia(msg.message)
-    if (!media) return
-    target = msg
+  // 3.5) Pedido do link do Drive: "@bot me envie o drive de hoje".
+  if (config.archiveEnabled && directed && !ownMedia && isDriveRequest(text)) {
+    await handleDriveLink(sock, jid, msg, text)
+    return
   }
 
-  // Pedido de LEGENDA (queimar legenda no vídeo) = vídeo + palavra "legenda".
-  // Senão, transcreve em texto como sempre.
-  const reqText = getText(msg.message).toLowerCase()
-  if (media.kind === 'video' && /legend/.test(reqText)) {
-    await captionAndSend(sock, jid, msg, target)
+  // 4) Resolve áudio/vídeo-alvo (na própria msg ou citada) p/ TRANSCRIÇÃO/LEGENDA.
+  let target
+  let media
+  if (config.mode === 'command') {
+    if ((msg.message.extendedTextMessage?.text || '').toLowerCase().includes(config.commandTrigger)) {
+      const ctx = getContextInfo(msg.message)
+      media = getMedia(ctx?.quotedMessage)
+      if (media) target = rebuildTarget(jid, ctx, botIds)
+    }
   } else {
-    await transcribeAndReply(sock, jid, msg, target, media)
+    // modos 'mention' e 'auto'
+    if (config.mode === 'mention' && isGroup(jid) && !mentioned) return // grupo: não é pra mim
+    if (ownMedia) {
+      media = ownMedia
+      target = msg
+    } else {
+      const ctx = getContextInfo(msg.message)
+      media = getMedia(ctx?.quotedMessage)
+      if (media) target = rebuildTarget(jid, ctx, botIds)
+    }
+  }
+
+  // 4a) Tem áudio/vídeo → transcrição ou legenda (comportamento original).
+  if (media && target) {
+    if (media.kind === 'video' && /legend/.test(text.toLowerCase())) {
+      await captionAndSend(sock, jid, msg, target)
+    } else {
+      await transcribeAndReply(sock, jid, msg, target, media)
+    }
+    return
+  }
+
+  // 4b) Sem áudio/vídeo, mas é pra mim e tem texto/imagem → ESPECIALISTA de IA.
+  if (config.expertEnabled && directed && (text || getImage(msg.message))) {
+    await handleExpert(sock, jid, msg, sender)
+    return
+  }
+
+  // 4c) Chamaram o bot sem nada acionável → dica curta.
+  if (mentioned) {
+    await sock
+      .sendMessage(jid, { text: '👋 Manda um *áudio/vídeo* que eu transcrevo, ou me peça uma *imagem/vídeo de IA*!' }, { quoted: msg })
+      .catch(() => {})
+  }
+}
+
+/** (descoberta) loga "nome do grupo -> JID" uma vez por grupo, pra você achar o JID. */
+const discoveredGroups = new Set()
+function logGroupOnce(sock, jid) {
+  if (discoveredGroups.has(jid)) return
+  discoveredGroups.add(jid)
+  sock
+    .groupMetadata(jid)
+    .then((meta) => console.log(`📋 GRUPO: "${meta?.subject || '?'}"  ->  ARCHIVE_GROUPS=${jid}`))
+    .catch(() => console.log(`📋 GRUPO  ->  ARCHIVE_GROUPS=${jid}`))
+}
+
+/** (descoberta) lista TODOS os grupos e seus JIDs no log, pra você achar o de edição. */
+async function listGroupsForDiscovery(sock) {
+  try {
+    const groups = Object.values(await sock.groupFetchAllParticipating())
+    console.log(`\n📋 ${groups.length} grupos — copie o JID do grupo de edição pra ARCHIVE_GROUPS no .env:`)
+    for (const g of groups) console.log(`   • "${g.subject}"  ->  ${g.id}`)
+    console.log('')
+  } catch (e) {
+    console.error('Não consegui listar os grupos:', e?.message || e)
+  }
+}
+
+/** Baixa o anexo (streaming) e sobe pro Drive em [raiz/AAAA-MM-DD/Tipo]. Reage ✅ no fim. */
+async function maybeArchive(sock, msg, jid) {
+  const att = classifyAttachment(msg.message)
+  if (!att) return // mensagem sem anexo (texto puro)
+  const id = msg.key.id
+  if (wasArchived(id)) return // reentrega do WhatsApp: já subimos
+
+  const now = new Date()
+  const dlTarget = { key: msg.key, message: unwrap(msg.message) }
+  const stream = await downloadMediaMessage(dlTarget, 'stream', {}, { logger, reqMediaUpload: sock.updateMediaMessage })
+  const folderId = await ensureArchivePath(archivePath({ rootName: config.archiveRootFolder, date: now, kind: att.kind }))
+  const sender = msg.pushName || normalizeId(msg.key.participant || jid)
+  const name = buildFileName({ date: now, sender, fileName: att.fileName, ext: att.ext })
+  await uploadStream({ name, parentId: folderId, mimeType: att.mimetype, stream })
+  await markArchived(id)
+  await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
+  console.log(`📥 Arquivado: ${name}`)
+}
+
+/** Responde com o link da pasta do dia (sob demanda: "@bot me envie o drive de hoje"). */
+async function handleDriveLink(sock, jid, msg, text) {
+  const date = parseDriveDate(text, new Date())
+  await sock.sendMessage(jid, { react: { text: '📁', key: msg.key } }).catch(() => {})
+  try {
+    const folderId = await ensureArchivePath([config.archiveRootFolder, dayFolderName(date)])
+    await sock.sendMessage(
+      jid,
+      { text: `📁 *${dayFolderName(date)}:*\n${folderLink(folderId)}` },
+      { quoted: msg },
+    )
+  } catch (e) {
+    console.error('Falha ao montar link do Drive:', e?.message || e)
+    await sock
+      .sendMessage(jid, { text: '❌ Não consegui pegar o link agora. Tenta de novo daqui a pouco.' }, { quoted: msg })
+      .catch(() => {})
+  }
+}
+
+/** Reconstrói a mensagem citada (com mídia) para conseguir baixá-la. */
+function rebuildTarget(jid, ctx, botIds) {
+  return {
+    key: {
+      remoteJid: jid,
+      id: ctx.stanzaId,
+      participant: ctx.participant,
+      fromMe: botIds.includes(normalizeId(ctx.participant)),
+    },
+    message: ctx.quotedMessage,
   }
 }
 
@@ -387,6 +467,137 @@ async function handleCut(sock, jid, msg, pending) {
   } finally {
     if (outPath) await rm(outPath, { force: true }).catch(() => {})
   }
+}
+
+/** Especialista de IA: conversa e gera imagem/vídeo via Higgsfield. */
+async function handleExpert(sock, jid, msg, sender) {
+  const text = getText(msg.message)
+  const image = getImage(msg.message)
+  await sock.sendMessage(jid, { react: { text: '🧠', key: msg.key } }).catch(() => {})
+
+  let decision
+  try {
+    decision = await consultExpert({ jid, userText: text || '(imagem enviada, sem texto)', hasImage: !!image })
+  } catch (err) {
+    console.error('Especialista falhou:', err?.message || err)
+    await sock.sendMessage(jid, { text: '❌ Tive um problema pra pensar nisso. Tenta de novo.' }, { quoted: msg }).catch(() => {})
+    return
+  }
+
+  await appendHistory(jid, 'user', text || '[imagem]')
+  if (decision.savePrefs) await setPrefs(jid, decision.savePrefs)
+
+  // Só conversa / consultoria.
+  if (decision.action === 'none') {
+    await sock.sendMessage(jid, { text: decision.reply || '🤔' }, { quoted: msg }).catch(() => {})
+    await appendHistory(jid, 'assistant', decision.reply || '')
+    return
+  }
+
+  const gen = {
+    action: decision.action,
+    model: decision.model,
+    prompt: decision.prompt,
+    params: decision.params,
+    useReferenceImage: decision.useReferenceImage && !!image,
+    imageMsg: image ? msg : null,
+  }
+
+  // IMAGEM: barata, gera direto.
+  if (decision.action === 'image') {
+    if (decision.reply) await sock.sendMessage(jid, { text: decision.reply }, { quoted: msg }).catch(() => {})
+    await appendHistory(jid, 'assistant', `${decision.reply || ''} [gerando imagem: ${gen.model}]`)
+    await executeGeneration(sock, jid, msg, gen)
+    return
+  }
+
+  // VÍDEO: confirma o custo antes (se configurado).
+  if (config.confirmVideo) {
+    let credits = '?'
+    try {
+      credits = await estimateCost({ model: gen.model, prompt: gen.prompt, params: gen.params })
+    } catch {
+      /* segue sem o número */
+    }
+    pendingGenerations.set(pendingKey(jid, sender), { ...gen, ts: Date.now() })
+    const dur = gen.params.duration ? `${gen.params.duration}s, ` : ''
+    await sock
+      .sendMessage(
+        jid,
+        { text: `${decision.reply || ''}\n\n🎬 *Vídeo* (${gen.model}, ${dur}${gen.params.quality || ''}) ≈ *${credits} créditos*.\nResponda *sim* pra gerar.` },
+        { quoted: msg }
+      )
+      .catch(() => {})
+    await appendHistory(jid, 'assistant', `${decision.reply || ''} [aguardando confirmação de vídeo ~${credits} créditos]`)
+    return
+  }
+
+  if (decision.reply) await sock.sendMessage(jid, { text: decision.reply }, { quoted: msg }).catch(() => {})
+  await executeGeneration(sock, jid, msg, gen)
+}
+
+/** Executa a geração (imagem/vídeo), baixa o resultado e envia no WhatsApp. */
+async function executeGeneration(sock, jid, msg, gen) {
+  await sock.sendMessage(jid, { react: { text: '🎨', key: msg.key } }).catch(() => {})
+  await sock
+    .sendMessage(
+      jid,
+      { text: gen.action === 'video' ? '🎬 Gerando o vídeo... pode levar alguns minutos.' : '🎨 Gerando a imagem...' },
+      { quoted: msg }
+    )
+    .catch(() => {})
+
+  let refPath
+  try {
+    if (gen.useReferenceImage && gen.imageMsg) {
+      refPath = await downloadRefImage(sock, gen.imageMsg).catch(() => null)
+    }
+    const res =
+      gen.action === 'video'
+        ? await generateVideo({
+            model: gen.model,
+            prompt: gen.prompt,
+            aspectRatio: gen.params.aspect_ratio,
+            duration: gen.params.duration,
+            quality: gen.params.quality,
+            imagePath: refPath,
+          })
+        : await generateImage({
+            model: gen.model,
+            prompt: gen.prompt,
+            aspectRatio: gen.params.aspect_ratio,
+            resolution: gen.params.resolution,
+            imagePath: refPath,
+          })
+    if (!res.ok || !res.urls.length) throw new Error('a geração não retornou resultado')
+
+    const buffer = await downloadBuffer(res.urls[0])
+    if (gen.action === 'video') {
+      await sock.sendMessage(jid, { video: buffer, caption: '✅ Pronto!' }, { quoted: msg })
+    } else {
+      await sock.sendMessage(jid, { image: buffer, caption: '✅ Pronto!' }, { quoted: msg })
+    }
+    await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
+  } catch (err) {
+    console.error('Geração falhou:', err?.message || err)
+    await sock.sendMessage(jid, { text: `❌ Não consegui gerar: ${err?.message || 'erro'}` }, { quoted: msg }).catch(() => {})
+    await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }).catch(() => {})
+  } finally {
+    if (refPath) await rm(refPath, { force: true }).catch(() => {})
+  }
+}
+
+/** Baixa a imagem (foto) de uma mensagem para um arquivo temporário (referência). */
+async function downloadRefImage(sock, msg) {
+  const m = unwrap(msg.message)
+  const isDocImg = m?.documentMessage?.mimetype?.startsWith('image/')
+  const node = m?.imageMessage || (isDocImg ? m.documentMessage : null)
+  if (!node) return null
+  const dlTarget = { key: msg.key, message: m?.imageMessage ? { imageMessage: node } : { documentMessage: node } }
+  const buffer = await downloadMediaMessage(dlTarget, 'buffer', {}, { logger, reqMediaUpload: sock.updateMediaMessage })
+  const path = join(tmpdir(), `hf_ref_${Date.now()}_${Math.floor(Math.random() * 1e6)}.jpg`)
+  await writeFile(path, buffer)
+  return path
 }
 
 function fmtClock(sec) {

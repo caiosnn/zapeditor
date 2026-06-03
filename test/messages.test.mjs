@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   getMedia,
+  getImage,
   getText,
   normalizeId,
   botIdentifiers,
@@ -23,6 +24,13 @@ test('getMedia desembrulha mensagem efêmera / documento-com-legenda', () => {
     getMedia({ documentWithCaptionMessage: { message: { documentMessage: { mimetype: 'video/mp4' } } } })?.kind,
     'video',
   )
+})
+
+test('getImage detecta imagem e documento de imagem', () => {
+  assert.equal(getImage({ imageMessage: {} })?.kind, 'image')
+  assert.equal(getImage({ documentMessage: { mimetype: 'image/png' } })?.kind, 'image')
+  assert.equal(getImage({ videoMessage: {} }), null)
+  assert.equal(getImage({ conversation: 'oi' }), null)
 })
 
 test('getText pega conversa, texto e legenda', () => {

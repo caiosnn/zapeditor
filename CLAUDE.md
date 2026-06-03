@@ -22,7 +22,22 @@ pm2 stop zapeditor / pm2 start zapeditor
 Mudanças em `caption-studio/` (Remotion) **não** precisam reiniciar — pegam no próximo render.
 
 ## Testes
-`npm test` (runner nativo `node:test`, sem dependência). Cobre a lógica pura: `caption-edit` (correções), `cut` (parse de trecho), `messages` (mídia/menção/documento) e `alignWords` (LCS do corretor). Arquivos em `test/*.test.mjs` — rode após mexer nessas funções.
+`npm test` (runner nativo `node:test`, sem dependência). Cobre a lógica pura: `caption-edit` (correções), `cut` (parse de trecho), `messages` (mídia/menção/documento), `alignWords` (LCS do corretor) e `archive` (classificação de anexo, nome de pasta/arquivo, parse do comando "drive"). Arquivos em `test/*.test.mjs` — rode após mexer nessas funções.
+
+## Arquivamento automático no Google Drive
+Sobe **todo anexo** (vídeo/imagem/áudio/doc) dos grupos configurados pro Google Drive da conta `redespartidoliberal@gmail.com` (projeto Cloud `pl-comunicacao-software`), organizado em **`Agendas FB / FB MM-DD-AAAA / <Tipo>`** (Tipo = Vídeos/Imagens/Áudios/Documentos). Só reage **✅** no arquivo — não manda mensagem, pra não poluir o grupo. Upload por **streaming** (aguenta vídeo grande). Anti-duplicado em `data/archive-index.json` (o WhatsApp reentrega mensagens ao reconectar).
+
+**Sob demanda:** marque o bot com *"drive de hoje"* (também entende *"ontem"* e *"DD/MM[/AAAA]"*) → responde o link da pasta do dia. A pasta raiz é compartilhada como *"qualquer um com o link vê"* (herdado pelas subpastas), então o link abre pra equipe.
+
+Config no `.env`: `ARCHIVE_ENABLED`, `ARCHIVE_GROUPS` (JIDs separados por vírgula), `ARCHIVE_ROOT_FOLDER`, `ARCHIVE_DISCOVER`, `GOOGLE_CLIENT_ID/SECRET`.
+- **Login (uma vez):** `npm run drive-auth` → abre o navegador, você autoriza, salva o refresh token em `auth/google.json`. Scope `drive.file` (o bot só vê o que ele cria).
+- **Descobrir o JID de um grupo:** `ARCHIVE_DISCOVER=true` + restart → lista os grupos no log do boot (`pm2 logs`). Copie o JID pra `ARCHIVE_GROUPS` e volte `ARCHIVE_DISCOVER=false`.
+- Código: `src/drive.js` (Drive API: auth, pastas, upload, compartilhar), `src/archive.js` (classificação/nomes — puro, testado), `src/archive-store.js` (dedupe). Gancho em `handleMessage` (`src/index.js`), roda sem `return` pra não atrapalhar transcrição/legenda.
+
+**Pegadinhas (já resolvidas):**
+- OAuth tipo **"app para computador"** aceita redirect `http://localhost:PORT` sem cadastrar; tipo "web" exige cadastrar a URI (senão `redirect_uri_mismatch`).
+- **Publique o app** (saia do modo "Teste" na tela de consentimento), senão o refresh token expira em 7 dias. Com `drive.file` (não sensível), publicar não exige verificação do Google.
+- `pm2 restart` relê o `.env` porque o bot usa `dotenv` (lê o arquivo no boot) — o aviso "--update-env" do PM2 não se aplica aqui.
 
 ## Git
 Repositório: `https://github.com/caiosnn/zapeditor.git` (branch `main`). `gh` autenticado como `caiosnn`. Commit normalmente quando o usuário pedir.

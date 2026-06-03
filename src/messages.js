@@ -23,6 +23,15 @@ export function getMedia(message) {
   return null
 }
 
+/** Detecta imagem (foto) — para usar como referência na geração por IA. */
+export function getImage(message) {
+  const m = unwrap(message)
+  if (m?.imageMessage) return { kind: 'image', ext: 'jpg', node: m.imageMessage }
+  const mime = m?.documentMessage?.mimetype || ''
+  if (mime.startsWith('image/')) return { kind: 'image', ext: 'jpg', node: m.documentMessage, isDoc: true }
+  return null
+}
+
 /** Pega o contextInfo de qualquer tipo de mensagem (texto ou mídia). */
 export function getContextInfo(message) {
   const m = unwrap(message)
