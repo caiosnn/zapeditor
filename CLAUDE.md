@@ -22,22 +22,31 @@ pm2 stop zapeditor / pm2 start zapeditor
 Mudanças em `caption-studio/` (Remotion) **não** precisam reiniciar — pegam no próximo render.
 
 ## Testes
-`npm test` (runner nativo `node:test`, sem dependência). Cobre a lógica pura: `caption-edit` (correções), `cut` (parse de trecho), `messages` (mídia/menção/documento), `alignWords` (LCS do corretor) e `archive` (classificação de anexo, nome de pasta/arquivo, parse do comando "drive"). Arquivos em `test/*.test.mjs` — rode após mexer nessas funções.
+`npm test` (runner nativo `node:test`, sem dependência). Cobre a lógica pura: `caption-edit` (correções), `cut` (parse de trecho), `messages` (mídia/menção/documento), `alignWords` (LCS do corretor), `archive` (classificação de anexo, nome de pasta/arquivo, parse do comando "drive") e `archive-nlu` (parse da intenção do comando admin). Arquivos em `test/*.test.mjs` — rode após mexer nessas funções.
 
 ## Arquivamento automático no Google Drive
 Sobe **todo anexo** (vídeo/imagem/áudio/doc) dos grupos configurados pro Google Drive da conta `redespartidoliberal@gmail.com` (projeto Cloud `pl-comunicacao-software`), organizado em **`Agendas FB / FB MM-DD-AAAA / <Tipo>`** (Tipo = Vídeos/Imagens/Áudios/Documentos). Só reage **✅** no arquivo — não manda mensagem, pra não poluir o grupo. Upload por **streaming** (aguenta vídeo grande). Anti-duplicado em `data/archive-index.json` (o WhatsApp reentrega mensagens ao reconectar).
 
 **Sob demanda:** marque o bot com *"drive de hoje"* (também entende *"ontem"* e *"DD/MM[/AAAA]"*) → responde o link da pasta do dia. A pasta raiz é compartilhada como *"qualquer um com o link vê"* (herdado pelas subpastas), então o link abre pra equipe.
 
-Config no `.env`: `ARCHIVE_ENABLED`, `ARCHIVE_GROUPS` (JIDs separados por vírgula), `ARCHIVE_ROOT_FOLDER`, `ARCHIVE_DISCOVER`, `GOOGLE_CLIENT_ID/SECRET`.
-- **Login (uma vez):** `npm run drive-auth` → abre o navegador, você autoriza, salva o refresh token em `auth/google.json`. Scope `drive.file` (o bot só vê o que ele cria).
-- **Descobrir o JID de um grupo:** `ARCHIVE_DISCOVER=true` + restart → lista os grupos no log do boot (`pm2 logs`). Copie o JID pra `ARCHIVE_GROUPS` e volte `ARCHIVE_DISCOVER=false`.
-- Código: `src/drive.js` (Drive API: auth, pastas, upload, compartilhar), `src/archive.js` (classificação/nomes — puro, testado), `src/archive-store.js` (dedupe). Gancho em `handleMessage` (`src/index.js`), roda sem `return` pra não atrapalhar transcrição/legenda.
+**Gerenciar quais grupos arquivam (2 jeitos, sincronizados via `data/settings.json`):**
+- **Interface web:** `http://localhost:3333` (senha em `WEB_PASSWORD`). Lista os grupos com um interruptor cada; aplica na hora. Servida pelo próprio bot (`src/web.js`, Express, login HTTP Basic).
+- **Pelo WhatsApp (admin):** quem está em `ADMIN_NUMBERS` manda no **privado** do bot (ou marcando **@bot** num grupo) em **linguagem natural** — "quais grupos você está?", "quais estão sendo arquivados?", "arquive o grupo X", "para de salvar o Y". A intenção é interpretada por IA (`src/archive-nlu.js`, via OpenRouter); também aceita responder pelo número da lista.
+- Fonte da verdade do estado: `src/settings.js` (lê/grava `data/settings.json` em runtime, sem reiniciar; default inicial vem do `.env`).
+
+Config no `.env`: `ARCHIVE_ENABLED`, `ARCHIVE_GROUPS`, `ARCHIVE_ROOT_FOLDER`, `ARCHIVE_DISCOVER`, `GOOGLE_CLIENT_ID/SECRET`, `WEB_ENABLED`/`WEB_PORT`/`WEB_PASSWORD`, `ADMIN_NUMBERS`.
+- **Login no Drive (uma vez):** `npm run drive-auth` → abre o navegador, você autoriza, salva o refresh token em `auth/google.json`. Scope `drive.file` (o bot só vê o que ele cria).
+- **Descobrir JID de grupo / identificador de admin:** `ARCHIVE_DISCOVER=true` + restart → loga os grupos no boot e o identificador de quem manda no privado (`📨 PRIVADO ... -> ADMIN_NUMBERS=`). Copie pro `.env` e volte pra `false`.
+- Código: `src/drive.js` (Drive API), `src/archive.js` (classificação/nomes — puro), `src/archive-store.js` (dedupe), `src/settings.js` (estado runtime), `src/web.js` (interface), `src/archive-nlu.js` (intenção do admin por IA). Gancho em `handleMessage` roda sem `return`.
 
 **Pegadinhas (já resolvidas):**
+- **LID:** no WhatsApp atual, tanto em grupo quanto no privado, a pessoa é identificada por um **LID** (ex `2501...`), NÃO pelo número (`5561...`). Por isso `ADMIN_NUMBERS` guarda o **LID** capturado na descoberta, não o telefone. `isAdmin` compara o `normalizeId` do remetente.
 - OAuth tipo **"app para computador"** aceita redirect `http://localhost:PORT` sem cadastrar; tipo "web" exige cadastrar a URI (senão `redirect_uri_mismatch`).
 - **Publique o app** (saia do modo "Teste" na tela de consentimento), senão o refresh token expira em 7 dias. Com `drive.file` (não sensível), publicar não exige verificação do Google.
 - `pm2 restart` relê o `.env` porque o bot usa `dotenv` (lê o arquivo no boot) — o aviso "--update-env" do PM2 não se aplica aqui.
+
+## Envio de mídia: preview + documento
+Toda mídia que o bot produz (legenda, corte, geração de imagem/vídeo) é enviada **2x**: **preview** inline (o WhatsApp comprime) e **documento** (mesmo arquivo, qualidade original sem recompressão). Função `sendMediaDual` em `src/index.js` (detecta PNG/JPG/WebP pra nomear o documento). Liga/desliga com `SEND_ORIGINAL_DOC` no `.env`.
 
 ## Git
 Repositório: `https://github.com/caiosnn/zapeditor.git` (branch `main`). `gh` autenticado como `caiosnn`. Commit normalmente quando o usuário pedir.

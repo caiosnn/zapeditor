@@ -32,6 +32,9 @@ export const config = {
   // Vídeo custa créditos: confirmar antes de gerar? (imagem é barata e vai direto)
   confirmVideo: (process.env.HF_CONFIRM_VIDEO?.trim() || 'true').toLowerCase() !== 'false',
 
+  // Enviar toda mídia produzida TAMBÉM como documento (qualidade original, sem recompressão).
+  sendOriginalDoc: (process.env.SEND_ORIGINAL_DOC?.trim() || 'true').toLowerCase() !== 'false',
+
   // --- Arquivamento automático no Google Drive ---
   // Credenciais do OAuth "app para computador" (Google Cloud Console).
   googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || '',
@@ -47,6 +50,18 @@ export const config = {
   archiveDiscover: (process.env.ARCHIVE_DISCOVER?.trim() || 'false').toLowerCase() === 'true',
   // Pasta raiz no Drive onde tudo é organizado.
   archiveRootFolder: process.env.ARCHIVE_ROOT_FOLDER?.trim() || 'Edições WhatsApp',
+
+  // --- Interface web (gestão do arquivamento por grupo) ---
+  webEnabled: (process.env.WEB_ENABLED?.trim() || 'false').toLowerCase() === 'true',
+  webPort: Number(process.env.WEB_PORT ?? 3333) || 3333,
+  webPassword: process.env.WEB_PASSWORD?.trim() || '',
+
+  // Números (com DDI, só dígitos) autorizados a gerenciar o arquivamento pelo
+  // WhatsApp (privado do bot). Separados por vírgula. Ex: 556199938020
+  adminNumbers: (process.env.ADMIN_NUMBERS || '')
+    .split(',')
+    .map((s) => s.replace(/\D/g, ''))
+    .filter(Boolean),
 }
 
 if (!config.openRouterApiKey) {

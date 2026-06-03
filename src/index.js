@@ -25,6 +25,9 @@ import { generateImage, generateVideo, estimateCost, downloadBuffer } from './hi
 import { classifyAttachment, archivePath, buildFileName, isDriveRequest, parseDriveDate, dayFolderName } from './archive.js'
 import { ensureArchivePath, uploadStream, folderLink } from './drive.js'
 import { initArchiveStore, wasArchived, markArchived } from './archive-store.js'
+import { initSettings, isGroupArchived, getArchiveEnabled, setGroupArchived } from './settings.js'
+import { startWeb } from './web.js'
+import { interpretArchiveCommand } from './archive-nlu.js'
 import {
   getMedia,
   getImage,
@@ -44,10 +47,22 @@ const pendingCaptions = new Map()
 const senderLatestCut = new Map()
 // gerações de vídeo aguardando confirmação de custo (chave: `${jid}|${sender}`)
 const pendingGenerations = new Map()
+// Listas numeradas de grupos mostradas ao admin no privado: jid -> { jids, ts }
+const adminLists = new Map()
 const PENDING_TTL = 30 * 60 * 1000
+
+// Conexão atual + estado, compartilhados com a interface web.
+let currentSock = null
+let webStarted = false
+let connState = { connected: false, since: null, me: null }
 
 function pendingKey(jid, sender) {
   return `${jid}|${sender}`
+}
+
+/** Esse JID (no privado) é um número autorizado a gerenciar o arquivamento? */
+function isAdmin(jid) {
+  return config.adminNumbers.includes(normalizeId(jid))
 }
 
 const logger = pino({ level: 'warn' })
@@ -56,6 +71,7 @@ async function start() {
   await initCutStore()
   await initExpertStore()
   await initArchiveStore()
+  await initSettings()
   const { state, saveCreds } = await useMultiFileAuthState('auth')
   const { version } = await fetchLatestBaileysVersion()
 
@@ -68,6 +84,12 @@ async function start() {
     markOnlineOnConnect: false,
     qrTimeout: 120_000,
   })
+  currentSock = sock
+
+  if (config.webEnabled && !webStarted) {
+    webStarted = true
+    startWeb({ getSock: () => currentSock, getStatus: () => connState })
+  }
 
   sock.ev.on('creds.update', saveCreds)
 
@@ -85,6 +107,7 @@ async function start() {
     }
 
     if (connection === 'open') {
+      connState = { connected: true, since: Date.now(), me: normalizeId(sock.user?.id || '') || null }
       console.log('\n✅ Bot conectado! Modo:', config.mode)
       if (config.mode === 'mention') {
         console.log('   Em grupos: transcreve só quando MARCAREM o bot (@). No privado: direto.')
@@ -97,6 +120,7 @@ async function start() {
     }
 
     if (connection === 'close') {
+      connState.connected = false
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode
       const shouldReconnect = code !== DisconnectReason.loggedOut
       console.log('🔌 Conexão fechada.', shouldReconnect ? 'Reconectando...' : 'Você foi deslogado.')
@@ -130,12 +154,28 @@ async function handleMessage(sock, msg) {
   const mentioned = isBotMentioned(msg.message, botIds)
   const directed = !isGroup(jid) || mentioned // privado sempre; em grupo, só com @
 
-  // 0) ARQUIVAMENTO automático no Drive (grupos configurados). Roda em paralelo ao
-  //    fluxo normal: NÃO dá return, então transcrição/legenda seguem funcionando.
-  if (config.archiveEnabled && isGroup(jid)) {
+  if (config.archiveDiscover && !isGroup(jid)) logPrivateOnce(jid, msg.pushName)
+
+  // 0) ARQUIVAMENTO automático no Drive (grupos ligados na interface web). Roda em
+  //    paralelo ao fluxo normal: NÃO dá return, transcrição/legenda seguem funcionando.
+  if (isGroup(jid)) {
     if (config.archiveDiscover) logGroupOnce(sock, jid)
-    if (config.archiveGroups.includes(jid)) {
+    if (isGroupArchived(jid)) {
       maybeArchive(sock, msg, jid).catch((e) => console.error('Arquivamento falhou:', e?.message || e))
+    }
+  }
+
+  // 0.5) ADMIN: ver/mudar o arquivamento em LINGUAGEM NATURAL — no privado, ou
+  //      marcando o bot (@) num grupo. A intenção é interpretada por IA.
+  if (isAdmin(sender) && directed) {
+    const pend = adminLists.get(jid)
+    if (pend && Date.now() - pend.ts < PENDING_TTL && /^\s*\d+\s*$/.test(text)) {
+      await handleAdminToggle(sock, jid, msg, pend, parseInt(text, 10))
+      return
+    }
+    if (/grupo|arquiv|salv/i.test(text)) {
+      await handleAdminCommand(sock, jid, msg, isGroup(jid) ? jid : null)
+      return
     }
   }
 
@@ -183,7 +223,7 @@ async function handleMessage(sock, msg) {
   }
 
   // 3.5) Pedido do link do Drive: "@bot me envie o drive de hoje".
-  if (config.archiveEnabled && directed && !ownMedia && isDriveRequest(text)) {
+  if (getArchiveEnabled() && directed && !ownMedia && isDriveRequest(text)) {
     await handleDriveLink(sock, jid, msg, text)
     return
   }
@@ -245,6 +285,14 @@ function logGroupOnce(sock, jid) {
     .catch(() => console.log(`📋 GRUPO  ->  ARCHIVE_GROUPS=${jid}`))
 }
 
+/** (descoberta) loga o número de quem manda no PRIVADO uma vez, pra cadastrar admin. */
+const discoveredPrivate = new Set()
+function logPrivateOnce(jid, name) {
+  if (discoveredPrivate.has(jid)) return
+  discoveredPrivate.add(jid)
+  console.log(`📨 PRIVADO de "${name || '?'}"  ->  ADMIN_NUMBERS=${normalizeId(jid)}`)
+}
+
 /** (descoberta) lista TODOS os grupos e seus JIDs no log, pra você achar o de edição. */
 async function listGroupsForDiscovery(sock) {
   try {
@@ -274,6 +322,108 @@ async function maybeArchive(sock, msg, jid) {
   await markArchived(id)
   await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
   console.log(`📥 Arquivado: ${name}`)
+}
+
+/** (admin) Interpreta o comando por IA e executa: listar / ligar / desligar arquivamento. */
+async function handleAdminCommand(sock, jid, msg, currentGroupJid) {
+  const text = getText(msg.message)
+  let groups
+  try {
+    groups = Object.values(await sock.groupFetchAllParticipating())
+      .map((g) => ({ jid: g.id, name: g.subject || '(sem nome)' }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
+  } catch {
+    await sock.sendMessage(jid, { text: '❌ Não consegui acessar os grupos agora. Tenta de novo daqui a pouco.' }, { quoted: msg }).catch(() => {})
+    return
+  }
+  const withStatus = groups.map((g) => ({ ...g, archived: isGroupArchived(g.jid) }))
+
+  let intent
+  try {
+    intent = await interpretArchiveCommand({ text, groups: withStatus, currentGroupJid })
+  } catch (e) {
+    console.error('Interpretação de arquivamento falhou:', e?.message || e)
+    await handleAdminList(sock, jid, msg) // fallback: mostra a lista numerada
+    return
+  }
+
+  if (intent.intent === 'list_archived') {
+    const on = withStatus.filter((g) => g.archived)
+    const txt = on.length
+      ? '📁 *Arquivando agora:*\n' + on.map((g) => `• ${g.name}`).join('\n')
+      : '📁 Nenhum grupo está sendo arquivado no momento.'
+    await sock.sendMessage(jid, { text: txt }, { quoted: msg }).catch(() => {})
+    return
+  }
+
+  if (intent.intent === 'list_groups') {
+    await handleAdminList(sock, jid, msg)
+    return
+  }
+
+  if (intent.intent === 'set') {
+    const g = withStatus[intent.groupIndex - 1]
+    if (!g) {
+      await sock
+        .sendMessage(jid, { text: intent.reply || '❓ Não entendi qual grupo. Me pergunta "quais grupos você está?" que eu listo.' }, { quoted: msg })
+        .catch(() => {})
+      return
+    }
+    const enable = intent.enable === null ? !g.archived : intent.enable
+    await setGroupArchived(g.jid, enable)
+    await sock
+      .sendMessage(jid, { text: (enable ? '✅ Agora *arquivando*: ' : '⬜ *Parei* de arquivar: ') + g.name }, { quoted: msg })
+      .catch(() => {})
+    return
+  }
+
+  // none
+  await sock
+    .sendMessage(
+      jid,
+      { text: intent.reply || '🤔 Posso *listar seus grupos*, dizer *quais estão sendo arquivados*, ou *arquivar/parar* um grupo. Ex: "arquive o grupo Tal".' },
+      { quoted: msg },
+    )
+    .catch(() => {})
+}
+
+/** (admin) Mostra a lista numerada de grupos com o status (e guarda pra resposta por número). */
+async function handleAdminList(sock, jid, msg) {
+  let groups
+  try {
+    groups = Object.values(await sock.groupFetchAllParticipating())
+      .map((g) => ({ jid: g.id, name: g.subject || '(sem nome)' }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
+  } catch {
+    await sock.sendMessage(jid, { text: '❌ Não consegui listar os grupos agora. Tenta de novo daqui a pouco.' }, { quoted: msg }).catch(() => {})
+    return
+  }
+  adminLists.set(jid, { jids: groups.map((g) => g.jid), ts: Date.now() })
+  const lines = groups.map((g, i) => `*${i + 1}.* ${isGroupArchived(g.jid) ? '✅' : '⬜'} ${g.name}`)
+  await sock
+    .sendMessage(jid, { text: '📁 *Arquivamento de grupos*\nResponda com o *número* pra ligar/desligar:\n\n' + lines.join('\n') }, { quoted: msg })
+    .catch(() => {})
+}
+
+/** (admin, privado) Liga/desliga o arquivamento do grupo escolhido pelo número da lista. */
+async function handleAdminToggle(sock, jid, msg, pend, n) {
+  const target = pend.jids[n - 1]
+  if (!target) {
+    await sock.sendMessage(jid, { text: '❓ Número fora da lista. Mande *arquivamento* pra ver de novo.' }, { quoted: msg }).catch(() => {})
+    return
+  }
+  const novo = !isGroupArchived(target)
+  await setGroupArchived(target, novo)
+  let nome = target
+  try {
+    nome = (await sock.groupMetadata(target)).subject || target
+  } catch {
+    /* sem metadata: usa o jid */
+  }
+  await sock
+    .sendMessage(jid, { text: (novo ? '✅ Agora *arquivando*: ' : '⬜ *Parei* de arquivar: ') + nome }, { quoted: msg })
+    .catch(() => {})
+  await handleAdminList(sock, jid, msg)
 }
 
 /** Responde com o link da pasta do dia (sob demanda: "@bot me envie o drive de hoje"). */
@@ -343,7 +493,7 @@ async function deliverCaption(sock, jid, replyTo, videoBuffer, words) {
   try {
     outPath = await renderCaption(videoBuffer, words)
     const video = await readFile(outPath)
-    await sock.sendMessage(jid, { video, caption: '✅ Legendado!' }, { quoted: replyTo })
+    await sendMediaDual(sock, jid, { kind: 'video', buffer: video, caption: '✅ Legendado!', baseName: 'legendado', quoted: replyTo })
     await sock.sendMessage(jid, {
       text:
         `📝 *Transcrição:*\n${formatTimedText(words)}\n\n` +
@@ -455,11 +605,13 @@ async function handleCut(sock, jid, msg, pending) {
   try {
     outPath = await cutVideo(pending.videoPath, range.start, range.end)
     const video = await readFile(outPath)
-    await sock.sendMessage(
-      jid,
-      { video, caption: `✅ Trecho ${fmtClock(range.start)}–${fmtClock(range.end)}. Pra legendar, responda este vídeo com *legenda*.` },
-      { quoted: msg }
-    )
+    await sendMediaDual(sock, jid, {
+      kind: 'video',
+      buffer: video,
+      caption: `✅ Trecho ${fmtClock(range.start)}–${fmtClock(range.end)}. Pra legendar, responda este vídeo com *legenda*.`,
+      baseName: `corte_${Math.round(range.start)}-${Math.round(range.end)}s`,
+      quoted: msg,
+    })
     await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
   } catch (err) {
     console.error('Falha ao cortar:', err?.message || err)
@@ -572,11 +724,13 @@ async function executeGeneration(sock, jid, msg, gen) {
     if (!res.ok || !res.urls.length) throw new Error('a geração não retornou resultado')
 
     const buffer = await downloadBuffer(res.urls[0])
-    if (gen.action === 'video') {
-      await sock.sendMessage(jid, { video: buffer, caption: '✅ Pronto!' }, { quoted: msg })
-    } else {
-      await sock.sendMessage(jid, { image: buffer, caption: '✅ Pronto!' }, { quoted: msg })
-    }
+    await sendMediaDual(sock, jid, {
+      kind: gen.action === 'video' ? 'video' : 'image',
+      buffer,
+      caption: '✅ Pronto!',
+      baseName: 'gerado',
+      quoted: msg,
+    })
     await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
   } catch (err) {
     console.error('Geração falhou:', err?.message || err)
@@ -598,6 +752,26 @@ async function downloadRefImage(sock, msg) {
   const path = join(tmpdir(), `hf_ref_${Date.now()}_${Math.floor(Math.random() * 1e6)}.jpg`)
   await writeFile(path, buffer)
   return path
+}
+
+/** Detecta o formato real da imagem pelos magic bytes (pra nomear o documento certo). */
+function imageMeta(buffer) {
+  if (buffer?.[0] === 0x89 && buffer?.[1] === 0x50) return { mime: 'image/png', ext: 'png' }
+  if (buffer?.length > 11 && buffer.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', ext: 'webp' }
+  return { mime: 'image/jpeg', ext: 'jpg' }
+}
+
+/** Envia a mídia como PREVIEW (inline, comprimido) e também como DOCUMENTO (qualidade original). */
+async function sendMediaDual(sock, jid, { kind, buffer, caption, baseName, quoted }) {
+  const ctx = quoted ? { quoted } : {}
+  // 1) preview inline — visualização rápida, com a legenda
+  await sock.sendMessage(jid, kind === 'video' ? { video: buffer, caption } : { image: buffer, caption }, ctx)
+  // 2) documento — mesmo arquivo sem a recompressão do WhatsApp
+  if (!config.sendOriginalDoc) return
+  const meta = kind === 'video' ? { mime: 'video/mp4', ext: 'mp4' } : imageMeta(buffer)
+  await sock
+    .sendMessage(jid, { document: buffer, mimetype: meta.mime, fileName: `${baseName || 'arquivo'}.${meta.ext}`, caption: '📎 Qualidade original' })
+    .catch((e) => console.error('Falha ao enviar documento original:', e?.message || e))
 }
 
 function fmtClock(sec) {

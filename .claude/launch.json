@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "caption-studio",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "caption-studio", "run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "zapeditor-bot",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/index.js"],
+      "port": 3333
+    }
+  ]
+}
