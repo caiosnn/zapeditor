@@ -21,6 +21,9 @@ pm2 stop zapeditor / pm2 start zapeditor
 
 Mudanças em `caption-studio/` (Remotion) **não** precisam reiniciar — pegam no próximo render.
 
+## Testes
+`npm test` (runner nativo `node:test`, sem dependência). Cobre a lógica pura: `caption-edit` (correções), `cut` (parse de trecho), `messages` (mídia/menção/documento) e `alignWords` (LCS do corretor). Arquivos em `test/*.test.mjs` — rode após mexer nessas funções.
+
 ## Git
 Repositório: `https://github.com/caiosnn/zapeditor.git` (branch `main`). `gh` autenticado como `caiosnn`. Commit normalmente quando o usuário pedir.
 

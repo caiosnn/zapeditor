@@ -159,7 +159,7 @@ const normWord = (s) => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
  * Alinha as palavras do Gemini (texto correto) aos tempos do Whisper via LCS.
  * Palavras casadas herdam o tempo do Whisper; inseridas têm o tempo interpolado.
  */
-function alignWords(whisper, gemini) {
+export function alignWords(whisper, gemini) {
   const a = whisper.map((w) => normWord(w.word))
   const b = gemini.map(normWord)
   const m = a.length
