@@ -35,6 +35,29 @@ export const config = {
   // Enviar toda mídia produzida TAMBÉM como documento (qualidade original, sem recompressão).
   sendOriginalDoc: (process.env.SEND_ORIGINAL_DOC?.trim() || 'true').toLowerCase() !== 'false',
 
+  // --- Media downloader (yt-dlp + gallery-dl) ---
+  // Marcar o bot (ou mandar no privado) num link de YouTube/X/Instagram/TikTok baixa a mídia.
+  downloaderEnabled: (process.env.DOWNLOADER_ENABLED?.trim() || 'true').toLowerCase() !== 'false',
+  // Caminhos dos binários (auto-detectados no PATH se vazios). yt-dlp baixa vídeo; gallery-dl, foto.
+  ytDlpPath: process.env.YTDLP_PATH?.trim() || '',
+  galleryDlPath: process.env.GALLERYDL_PATH?.trim() || '',
+  // Teto de qualidade/tamanho (perfil equilibrado: até 1080p, ~200MB, ~20min).
+  downloadMaxHeight: Number(process.env.DOWNLOAD_MAX_HEIGHT ?? 1080) || 1080,
+  downloadMaxFilesizeMB: Number(process.env.DOWNLOAD_MAX_FILESIZE_MB ?? 200) || 200,
+  downloadMaxDurationSec: Number(process.env.DOWNLOAD_MAX_DURATION_SEC ?? 1200) || 1200,
+  // Máximo de arquivos por link (carrossel do Instagram, galeria, etc).
+  downloadMaxItems: Number(process.env.DOWNLOAD_MAX_ITEMS ?? 10) || 10,
+  // Navegador de onde puxar cookies (ex.: chrome|edge|firefox) p/ conteúdo que exige login. Vazio = sem cookies.
+  downloadCookiesFromBrowser: process.env.DOWNLOAD_COOKIES_BROWSER?.trim() || '',
+  // Arquivo cookies.txt (formato Netscape) p/ IG/X logado — mais estável no servidor que ler o navegador.
+  downloadCookiesFile: process.env.DOWNLOAD_COOKIES_FILE?.trim() || '',
+  // Instagram via instaloader (sessão persistente: login uma vez, dura meses). Usuário do IG.
+  instagramUser: process.env.INSTAGRAM_USER?.trim() || '',
+  // Caminho do executável instaloader (vazio = auto-detecta no PATH).
+  instaloaderPath: process.env.INSTALOADER_PATH?.trim() || '',
+  // Arquivo de sessão do instaloader (vazio = auth/instaloader/session-<user>).
+  instaloaderSession: process.env.INSTALOADER_SESSION?.trim() || '',
+
   // --- Arquivamento automático no Google Drive ---
   // Credenciais do OAuth "app para computador" (Google Cloud Console).
   googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || '',

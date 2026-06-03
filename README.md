@@ -18,8 +18,9 @@ Bot assistente para grupos de WhatsApp com 3 funções, todas acionadas **marcan
 | **Legendar** | Responda a um **vídeo** + marque o bot + escreva **"legenda"** → recebe o vídeo legendado + a transcrição. |
 | **Corrigir legenda** | Responda com **CORREÇÃO** + a parte certa (`CORREÇÃO se → você`, ou o texto completo) → re-renderiza. |
 | **Cortar** | Depois de transcrever um vídeo, **responda a transcrição** com **CORTE** + início/fim (cole os blocos, números de bloco, ou tempos) → recebe o trecho. Depois pode legendar. |
+| **Baixar mídia** | Marque o bot num **link de YouTube, X, Instagram ou TikTok** (ou responda a um link + @bot) → recebe o vídeo/foto baixado. |
 
-No **privado** os gatilhos por palavra-chave (CORREÇÃO, CORTE) funcionam sem precisar marcar.
+No **privado** os gatilhos por palavra-chave (CORREÇÃO, CORTE) e os links funcionam sem precisar marcar.
 
 ---
 
@@ -28,6 +29,7 @@ No **privado** os gatilhos por palavra-chave (CORREÇÃO, CORTE) funcionam sem p
 - **Node.js 18+** (testado no v24)
 - **ffmpeg** + **ffprobe** no PATH
 - **Python 3** + **faster-whisper** (`pip install faster-whisper`) — para timestamps por palavra (legenda) e vídeos longos (transcrição)
+- **yt-dlp** no PATH — para o media downloader (vídeo de YouTube/X/Instagram/TikTok). Instagram (reel/post/foto/story): **instaloader** (`pip install instaloader`). Foto pura de IG/X: **gallery-dl** (`pip install gallery-dl`)
 - **Remotion** (instalado em `caption-studio/`) + Chromium headless (baixado no 1º uso)
 - Chave do **OpenRouter** (em `.env`)
 
@@ -65,6 +67,7 @@ WHISPER_MODEL=small           # tiny|base|small|medium (faster-whisper)
 - `caption.js` — pipeline da legenda (transcreve → Remotion render → comprime)
 - `caption-edit.js` — parsing de correções (CORREÇÃO), formatação com timestamps
 - `cut.js` + `cut-store.js` — cortes (parse de trecho, ffmpeg, store em disco por ID da transcrição)
+- `downloader.js` — media downloader: `detectMediaUrl`/`parseInstagram` (acha link e tipo) + `downloadMedia` (yt-dlp p/ vídeo, instaloader p/ Instagram, gallery-dl p/ foto). IG público sai sem login; stories/privado via `npm run ig-login` (sessão persistente)
 
 **Render da legenda (Remotion, `caption-studio/`):** clonado de `remotion-dev/template-tiktok`.
 - `src/CaptionedVideo/index.tsx` — composição (mantém resolução via `dims.json`), agrupa páginas, quebra por frase, máx 2 linhas

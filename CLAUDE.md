@@ -48,6 +48,23 @@ Config no `.env`: `ARCHIVE_ENABLED`, `ARCHIVE_GROUPS`, `ARCHIVE_ROOT_FOLDER`, `A
 ## Envio de mídia: preview + documento
 Toda mídia que o bot produz (legenda, corte, geração de imagem/vídeo) é enviada **2x**: **preview** inline (o WhatsApp comprime) e **documento** (mesmo arquivo, qualidade original sem recompressão). Função `sendMediaDual` em `src/index.js` (detecta PNG/JPG/WebP pra nomear o documento). Liga/desliga com `SEND_ORIGINAL_DOC` no `.env`.
 
+## Media downloader (yt-dlp + instaloader + gallery-dl)
+Marque o bot (ou mande no **privado**) num link de **YouTube, X (Twitter), Instagram ou TikTok** → ele baixa o vídeo/foto e reenvia no chat (via `sendMediaDual`). O link pode estar na própria mensagem **ou na citada** (responder a um link + @bot).
+- **Stack 100% gratuita** (sem API paga), chamada **sem shell** (args literais — a URL do usuário vai literal, sem injeção):
+  - `yt-dlp` — vídeo das 4 plataformas (precisa de `ffmpeg` no PATH pro merge)
+  - `instaloader` — Instagram reel/post/foto/**story** (`pip install instaloader`)
+  - `gallery-dl` — foto pura de IG/X (rede de segurança; `pip install gallery-dl`)
+- **Roteamento por plataforma** (em `downloadMedia`): YouTube/TikTok → yt-dlp; X → yt-dlp+cookies → gallery-dl; IG post/reel → **instaloader direto** (anônimo p/ público ou logado) → gallery-dl; IG story → instaloader (exige sessão). Pro IG vai direto no instaloader (não tenta yt-dlp antes) pra **reduzir requisições ao IG** e evitar rate limit.
+- **Anti-rate-limit do IG:** instaloader roda com `--no-iphone` (metade das queries) e as chamadas de IG passam por `igWithRetry` (re-tenta após 20s/40s se o IG pedir "wait a few minutes", em vez de mostrar erro pro usuário). O rate limit normalmente só aparece com rajada de downloads; uso normal (1 link) não dispara.
+- **Nome do arquivo = título do vídeo:** o yt-dlp salva como `%(title)` (com `--windows-filenames`), e esse título vai pra **legenda do preview E pro nome do documento** (`f.title` em `collectFiles` → `handleDownload`). IG via instaloader usa o shortcode (não há título).
+- **O que funciona SEM configurar nada:** YouTube, TikTok, e **IG/X públicos** (o instaloader anônimo baixa post/reel/foto público do IG — validado).
+- **Instagram logado (stories + privado) — CONFIGURA UMA VEZ:** `INSTAGRAM_USER` no `.env` + `npm run ig-login` (digita senha/2FA uma vez → sessão persistente em `auth/instaloader/session-<user>`, dura meses, o instaloader renova sozinho) + `pm2 restart`. Script: `scripts/ig-login.mjs` (spawna o instaloader com `stdio:'inherit'`).
+- **X (Twitter) logado:** o X exige login hoje → `DOWNLOAD_COOKIES_FILE` (cookies.txt Netscape, exportado do navegador) ou `DOWNLOAD_COOKIES_BROWSER=chrome|edge|firefox`. As mesmas flags valem pro yt-dlp e gallery-dl.
+- **Perfil padrão:** até 1080p, ~200MB, ~20min, máx 10 itens/link (`.env`: `DOWNLOAD_MAX_*`).
+- **Código:** `src/downloader.js` — `detectMediaUrl(text)` + `parseInstagram(url)` (puros, testados em `test/downloader.test.mjs`) + `downloadMedia(hit)` (recebe o objeto do detector). Gancho em `handleMessage` (item **3.6**, **antes** do especialista de IA, senão um link viraria pedido de geração) → `handleDownload` no `src/index.js`. Liga/desliga com `DOWNLOADER_ENABLED`.
+- **`runProc` usa `stdio:['ignore','pipe','pipe']`** → nenhuma ferramenta trava esperando senha num terminal não-interativo (importante rodando via PM2).
+- **Erros tratados** (mensagem amigável, sem stacktrace): `TOO_LONG` / `TOO_BIG` / `AUTH` / `AUTH_IG_STORY` (story sem login configurado) / `RATE` (rate limit, após esgotar o retry) / `NO_MEDIA`.
+
 ## Git
 Repositório: `https://github.com/caiosnn/zapeditor.git` (branch `main`). `gh` autenticado como `caiosnn`. Commit normalmente quando o usuário pedir.
 

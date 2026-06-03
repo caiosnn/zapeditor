@@ -28,6 +28,7 @@ import { initArchiveStore, wasArchived, markArchived } from './archive-store.js'
 import { initSettings, isGroupArchived, getArchiveEnabled, setGroupArchived } from './settings.js'
 import { startWeb } from './web.js'
 import { interpretArchiveCommand } from './archive-nlu.js'
+import { detectMediaUrl, downloadMedia } from './downloader.js'
 import {
   getMedia,
   getImage,
@@ -226,6 +227,17 @@ async function handleMessage(sock, msg) {
   if (getArchiveEnabled() && directed && !ownMedia && isDriveRequest(text)) {
     await handleDriveLink(sock, jid, msg, text)
     return
+  }
+
+  // 3.6) MEDIA DOWNLOADER: link de YouTube/X/Instagram/TikTok (na msg ou na citada)
+  //      marcando o bot → baixa o vídeo/foto e envia no chat.
+  if (config.downloaderEnabled && directed && !ownMedia) {
+    const quotedText = getText(getContextInfo(msg.message)?.quotedMessage)
+    const hit = detectMediaUrl(text) || detectMediaUrl(quotedText)
+    if (hit) {
+      await handleDownload(sock, jid, msg, hit)
+      return
+    }
   }
 
   // 4) Resolve áudio/vídeo-alvo (na própria msg ou citada) p/ TRANSCRIÇÃO/LEGENDA.
@@ -443,6 +455,64 @@ async function handleDriveLink(sock, jid, msg, text) {
       .sendMessage(jid, { text: '❌ Não consegui pegar o link agora. Tenta de novo daqui a pouco.' }, { quoted: msg })
       .catch(() => {})
   }
+}
+
+/** Baixa o vídeo/foto do link (yt-dlp + gallery-dl) e envia no chat (preview + documento). */
+async function handleDownload(sock, jid, msg, hit) {
+  await sock.sendMessage(jid, { react: { text: '⏬', key: msg.key } }).catch(() => {})
+  await sock.sendMessage(jid, { text: `⏬ Baixando do *${hit.platform}*... um instante.` }, { quoted: msg }).catch(() => {})
+  let result
+  try {
+    result = await downloadMedia(hit)
+  } catch (err) {
+    console.error('Download falhou:', err?.message || err)
+    await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }).catch(() => {})
+    await sock.sendMessage(jid, { text: downloadErrorMessage(err, hit) }, { quoted: msg }).catch(() => {})
+    return
+  }
+  try {
+    const total = result.files.length
+    let n = 0
+    for (const f of result.files) {
+      n++
+      const buffer = await readFile(f.path)
+      const titulo = (f.title || '').trim() || `${hit.platform.toLowerCase()}_${n}`
+      const prefixo = total > 1 ? `✅ ${n}/${total} — ` : '✅ '
+      await sendMediaDual(sock, jid, {
+        kind: f.kind,
+        buffer,
+        caption: `${prefixo}${titulo}`, // título no preview
+        baseName: titulo, // título no nome do documento
+        quoted: msg,
+      })
+    }
+    await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
+  } catch (err) {
+    console.error('Falha ao enviar mídia baixada:', err?.message || err)
+    await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }).catch(() => {})
+    await sock
+      .sendMessage(jid, { text: '❌ Baixei, mas não consegui enviar (arquivo grande demais pro WhatsApp?).' }, { quoted: msg })
+      .catch(() => {})
+  } finally {
+    await result.cleanup()
+  }
+}
+
+/** Traduz o erro do downloader numa mensagem amigável pro usuário. */
+function downloadErrorMessage(err, hit) {
+  const m = err?.message || ''
+  if (m.startsWith('TOO_LONG:')) return `⚠️ Esse vídeo passa de ~${m.split(':')[1]} min — não vou baixar pra não pesar. Manda um trecho menor?`
+  if (m.startsWith('TOO_BIG:')) return `⚠️ O arquivo passou de ${m.split(':')[1]}MB. Tenta um vídeo menor ou um trecho.`
+  if (m === 'RATE') return '⏳ O *Instagram* pediu pra aguardar alguns minutos (muitas requisições seguidas). Tenta de novo daqui a pouco.'
+  if (m === 'AUTH_IG_STORY') return '🔒 Pra baixar *stories do Instagram* preciso estar logado. Configure uma vez no servidor: `npm run ig-login`.'
+  if (m === 'AUTH') {
+    return hit.platform === 'Instagram'
+      ? '🔒 Esse conteúdo do *Instagram* é privado ou pede login. Configure o login uma vez: `npm run ig-login` (ou um cookies.txt no .env).'
+      : `🔒 O *${hit.platform}* pediu login pra esse conteúdo. Configure um cookies.txt no .env (DOWNLOAD_COOKIES_FILE).`
+  }
+  if (m === 'NO_MEDIA') return `🤔 Não achei vídeo nem foto baixável nesse link do *${hit.platform}*.`
+  if (/não encontrado/i.test(m)) return `❌ ${m}`
+  return `❌ Não consegui baixar do *${hit.platform}* agora. Tenta de novo daqui a pouco.`
 }
 
 /** Reconstrói a mensagem citada (com mídia) para conseguir baixá-la. */
@@ -764,13 +834,14 @@ function imageMeta(buffer) {
 /** Envia a mídia como PREVIEW (inline, comprimido) e também como DOCUMENTO (qualidade original). */
 async function sendMediaDual(sock, jid, { kind, buffer, caption, baseName, quoted }) {
   const ctx = quoted ? { quoted } : {}
-  // 1) preview inline — visualização rápida, com a legenda
-  await sock.sendMessage(jid, kind === 'video' ? { video: buffer, caption } : { image: buffer, caption }, ctx)
+  const meta = kind === 'video' ? { mime: 'video/mp4', ext: 'mp4' } : imageMeta(buffer)
+  const fileName = `${baseName || 'arquivo'}.${meta.ext}`
+  // 1) preview inline — visualização rápida, com a legenda (vídeo também leva o nome do arquivo)
+  await sock.sendMessage(jid, kind === 'video' ? { video: buffer, caption, fileName } : { image: buffer, caption }, ctx)
   // 2) documento — mesmo arquivo sem a recompressão do WhatsApp
   if (!config.sendOriginalDoc) return
-  const meta = kind === 'video' ? { mime: 'video/mp4', ext: 'mp4' } : imageMeta(buffer)
   await sock
-    .sendMessage(jid, { document: buffer, mimetype: meta.mime, fileName: `${baseName || 'arquivo'}.${meta.ext}`, caption: '📎 Qualidade original' })
+    .sendMessage(jid, { document: buffer, mimetype: meta.mime, fileName, caption: '📎 Qualidade original' })
     .catch((e) => console.error('Falha ao enviar documento original:', e?.message || e))
 }
 
