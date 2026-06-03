@@ -219,8 +219,13 @@ async function collectFiles(dir) {
 
 async function ytdlp(url, dir) {
   const h = config.downloadMaxHeight
-  // h=0 → SEMPRE a maior qualidade (melhor vídeo + melhor áudio, merge); h>0 → limita a altura.
-  const format = h > 0 ? `bv*[height<=${h}]+ba/b[height<=${h}]/b` : 'bv*+ba/b'
+  const hf = h > 0 ? `[height<=${h}]` : '' // teto de altura (vazio = sem limite)
+  // 'h264' → prefere H.264 + AAC (abre em qualquer editor: Premiere, CapCut...); cai pro melhor só se não houver.
+  // 'best' → melhor vídeo + melhor áudio (pode vir VP9/AV1 4K, que muitos editores não reconhecem).
+  const format =
+    config.downloadVideoCodec === 'best'
+      ? `bv*${hf}+ba/b${hf}/b`
+      : `bv*[vcodec^=avc1]${hf}+ba[acodec^=mp4a]/b[vcodec^=avc1]${hf}/bv*${hf}+ba/b${hf}/b`
   const args = [
     '--no-playlist',
     '--no-warnings',

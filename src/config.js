@@ -44,6 +44,9 @@ export const config = {
   // Caminho do ffmpeg (arquivo ou pasta). Vazio = auto-detecta (PATH ou winget). CRÍTICO: sem ele
   // o yt-dlp não junta vídeo+áudio e cai numa resolução baixa (o PM2 nem sempre tem ffmpeg no PATH).
   ffmpegLocation: process.env.FFMPEG_LOCATION?.trim() || '',
+  // Codec do vídeo: 'h264' = compatível com editores (Premiere/CapCut) — H.264/AAC, até 1080p no YouTube.
+  //                 'best' = máxima resolução (pode vir VP9/AV1 4K, que muitos editores não abrem).
+  downloadVideoCodec: (process.env.DOWNLOAD_VIDEO_CODEC?.trim() || 'h264').toLowerCase() === 'best' ? 'best' : 'h264',
   // Qualidade do vídeo: 0 = SEMPRE a maior disponível (sem teto). >0 limita a altura (ex.: 1080).
   downloadMaxHeight: Number(process.env.DOWNLOAD_MAX_HEIGHT ?? 0) || 0,
   // Teto de tamanho (generoso p/ alta qualidade) e duração.
