@@ -503,13 +503,11 @@ function downloadErrorMessage(err, hit) {
   const m = err?.message || ''
   if (m.startsWith('TOO_LONG:')) return `⚠️ Esse vídeo passa de ~${m.split(':')[1]} min — não vou baixar pra não pesar. Manda um trecho menor?`
   if (m.startsWith('TOO_BIG:')) return `⚠️ O arquivo passou de ${m.split(':')[1]}MB. Tenta um vídeo menor ou um trecho.`
-  if (m === 'RATE') return '⏳ O *Instagram* pediu pra aguardar alguns minutos (muitas requisições seguidas). Tenta de novo daqui a pouco.'
-  if (m === 'AUTH_IG_STORY') return '🔒 Pra baixar *stories do Instagram* preciso estar logado. Configure uma vez no servidor: `npm run ig-login`.'
-  if (m === 'AUTH') {
-    return hit.platform === 'Instagram'
-      ? '🔒 Esse conteúdo do *Instagram* é privado ou pede login. Configure o login uma vez: `npm run ig-login` (ou um cookies.txt no .env).'
-      : `🔒 O *${hit.platform}* pediu login pra esse conteúdo. Configure um cookies.txt no .env (DOWNLOAD_COOKIES_FILE).`
+  if (m === 'RATE') return '⏳ O *Instagram* está limitando os acessos agora (acontece após muitas tentativas seguidas). Tenta de novo mais tarde.'
+  if (m === 'AUTH_IG_STORY' || (m === 'AUTH' && hit.platform === 'Instagram')) {
+    return '🔒 Esse conteúdo do *Instagram* precisa de login. O admin precisa configurar um *cookies.txt* do IG no bot (DOWNLOAD_COOKIES_FILE).'
   }
+  if (m === 'AUTH') return `🔒 O *${hit.platform}* pediu login. O admin precisa configurar um *cookies.txt* no bot (DOWNLOAD_COOKIES_FILE).`
   if (m === 'NO_MEDIA') return `🤔 Não achei vídeo nem foto baixável nesse link do *${hit.platform}*.`
   if (/não encontrado/i.test(m)) return `❌ ${m}`
   return `❌ Não consegui baixar do *${hit.platform}* agora. Tenta de novo daqui a pouco.`

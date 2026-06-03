@@ -223,8 +223,16 @@ async function gallerydl(url, dir) {
   return runProc(gd.file, [...gd.pre, ...args], { timeoutMs: 5 * 60_000 })
 }
 
-/** Instagram post/reel por shortcode. Usa a sessão se houver (senão tenta anônimo = público). */
-async function instaloaderPost(shortcode, dir) {
+/** Tem cookies (arquivo ou navegador) configurados? */
+function cookiesConfigured() {
+  return !!((config.downloadCookiesFile && existsSync(config.downloadCookiesFile)) || config.downloadCookiesFromBrowser)
+}
+
+/**
+ * Instagram post/reel por shortcode (instaloader). `login:false` = anônimo (post público; NÃO
+ * dispara o "check if logged in" que o IG bloqueia); `login:true` = usa a sessão (conteúdo privado).
+ */
+async function instaloaderPost(shortcode, dir, { login = false } = {}) {
   const il = instaloaderCmd()
   const args = [
     ...il.pre,
@@ -238,7 +246,7 @@ async function instaloaderPost(shortcode, dir) {
     '--no-iphone', // menos requisições à API do IG -> menos rate limit
     '--quiet',
   ]
-  if (hasInstaSession()) args.push('--login', config.instagramUser, '--sessionfile', instaSessionFile())
+  if (login && hasInstaSession()) args.push('--login', config.instagramUser, '--sessionfile', instaSessionFile())
   args.push('--', `-${shortcode}`) // prefixo '-' = baixar POST por shortcode (não perfil)
   return runProc(il.file, args, { timeoutMs: 5 * 60_000 })
 }
@@ -306,33 +314,47 @@ export async function downloadMedia(hit) {
     let out = ''
 
     if (platform === 'Instagram') {
-      if (igKind === 'story') {
-        // Story: só instaloader (logado por natureza). Com retry contra rate limit.
-        const r = await igWithRetry(dir, () => instaloaderStories(hit.username, dir))
-        if (r.noSession) throw new Error('AUTH_IG_STORY')
-        out = r.out
-        files = r.files
-        // Story específica na URL? tenta isolar pelo id; senão manda as ativas.
+      const haveCookies = cookiesConfigured()
+
+      // 1) yt-dlp (com cookies) — caminho "de navegador" do IG: baixa reel/post/story em vídeo
+      //    autenticado, sem o bloqueio de graphql que derruba o instaloader.
+      const r = await ytdlp(url, dir)
+      files = await collectFiles(dir)
+      out = `${r.stdout}\n${r.stderr}`
+
+      // 2) Fallback instaloader — SÓ quando NÃO há cookies. Com cookies, o yt-dlp + gallery-dl já
+      //    cobrem o IG; o instaloader bate na graphql e o IG bloqueia fácil, então não insistimos.
+      if (!files.length && !haveCookies && igKind === 'story') {
+        const g = await igWithRetry(dir, () => instaloaderStories(hit.username, dir))
+        out += `\n${g.out}`
+        files = g.files
+        if (!files.length && g.noSession) throw new Error('AUTH_IG_STORY')
         if (files.length > 1 && hit.storyId) {
           const exact = files.filter((f) => f.path.includes(hit.storyId))
           if (exact.length) files = exact
         }
-      } else if (hit.shortcode) {
-        // Post/reel: instaloader DIRETO (mais leve que yt-dlp anônimo → menos rate limit).
-        const r = await igWithRetry(dir, () => instaloaderPost(hit.shortcode, dir))
-        out = r.out
-        files = r.files
-        // Fallback foto (carrossel etc): gallery-dl — só se não foi rate limit.
-        if (!files.length && images && !isRateLimited(out)) {
-          const g = await gallerydl(url, dir)
-          out += `\n${g.stdout}\n${g.stderr}`
-          files = await collectFiles(dir)
+      } else if (!files.length && !haveCookies && hit.shortcode) {
+        // Post/reel: anônimo primeiro (evita o "login check" bloqueado); logado se houver sessão.
+        let g = await igWithRetry(dir, () => instaloaderPost(hit.shortcode, dir, { login: false }))
+        out += `\n${g.out}`
+        files = g.files
+        if (!files.length && hasInstaSession() && !isRateLimited(g.out)) {
+          g = await igWithRetry(dir, () => instaloaderPost(hit.shortcode, dir, { login: true }))
+          out += `\n${g.out}`
+          files = g.files
         }
-      } else {
-        // Perfil/outro: gallery-dl.
+      }
+
+      // 3) Foto pura (carrossel, perfil) → gallery-dl (com cookies, pega foto autenticada).
+      if (!files.length && images && !isRateLimited(out)) {
         const g = await gallerydl(url, dir)
-        out = `${g.stdout}\n${g.stderr}`
+        out += `\n${g.stdout}\n${g.stderr}`
         files = await collectFiles(dir)
+      }
+
+      // Story que não veio e não dá pra autenticar (sem cookies nem sessão) → orienta config.
+      if (!files.length && igKind === 'story' && !haveCookies && !hasInstaSession()) {
+        throw new Error('AUTH_IG_STORY')
       }
     } else {
       // YouTube / TikTok / X → yt-dlp (vídeo).
