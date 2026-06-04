@@ -45,6 +45,16 @@ Config no `.env`: `ARCHIVE_ENABLED`, `ARCHIVE_GROUPS`, `ARCHIVE_ROOT_FOLDER`, `A
 - **Publique o app** (saia do modo "Teste" na tela de consentimento), senão o refresh token expira em 7 dias. Com `drive.file` (não sensível), publicar não exige verificação do Google.
 - `pm2 restart` relê o `.env` porque o bot usa `dotenv` (lê o arquivo no boot) — o aviso "--update-env" do PM2 não se aplica aqui.
 
+## Biblioteca de edições (guardar/recuperar vídeos por comando)
+A equipe guarda vídeos em pastas nomeadas no Drive e recupera depois, **em linguagem natural**. Estrutura: `ARCHIVE_ROOT_FOLDER / Edições / <Categoria> / <nome>.mp4` (categorias: Compilados, Cortes, Brutos, ou livres como "Bastidores").
+- **Guardar:** responda/mande um **vídeo** + marque o bot dizendo a categoria — "esse é o *compilado* da campanha" → cria a pasta e sobe como `campanha.mp4`, reage ✅. Sem nome → usa um carimbo de data/hora.
+- **Recuperar:** "@bot *manda o compilado* da campanha" → acha no Drive (casamento tolerante a acento/maiúscula) e reenvia via `sendMediaDual` (até 3 por vez).
+- **Listar:** "o que tem em *cortes*?" / "quais pastas?" → lista nomes.
+- **Quem/quando:** qualquer um em contexto direcionado (privado ou @bot), com o arquivamento ligado (`getArchiveEnabled`). Liga/desliga com `EDITS_ENABLED`.
+- **Como decide:** gancho item **3.7** do `handleMessage` (pré-filtro por palavra-chave: compilad/corte/bruto/guarda/salva/edição) → IA (`src/edits-nlu.js`) classifica `save|fetch|list|none` + categoria + nome.
+- **Código:** `src/edits.js` (puro: `normalizeCategory`/`sanitizeName`/`matchFiles`, testado) · `src/edits-nlu.js` (NLU) · Drive em `src/drive.js` (`findFolderPath`, `listFolders`, `listFiles`, `downloadFileToPath`, `deleteFile`). Dedupe do guardar por msg id (`edit:<id>` no archive-store).
+- **Coexistência (resolvida):** o item **3** (corte de transcrição) só intercepta com trecho válido (`parseCutRange`), senão "manda o corte X" passa pra cá; o item **0.5** (admin-archive) ignora textos com palavra de edição.
+
 ## Envio de mídia: preview + documento
 Toda mídia que o bot produz (legenda, corte, geração de imagem/vídeo) é enviada **2x**: **preview** inline (o WhatsApp comprime) e **documento** (mesmo arquivo, qualidade original sem recompressão). Função `sendMediaDual` em `src/index.js` (detecta PNG/JPG/WebP pra nomear o documento). Liga/desliga com `SEND_ORIGINAL_DOC` no `.env`.
 

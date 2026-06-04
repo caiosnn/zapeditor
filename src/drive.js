@@ -3,6 +3,7 @@
 // Escopo usado: drive.file -> o bot só enxerga/gerencia o que ELE mesmo criou.
 import { google } from 'googleapis'
 import { readFile } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
 import { join } from 'node:path'
 
 import { config } from './config.js'
@@ -78,6 +79,57 @@ export async function ensureFolderPath(parts) {
   return parent
 }
 
+/** Acha um caminho de pastas SEM criar nada (null se alguma não existir). */
+export async function findFolderPath(parts) {
+  const drive = await getDrive()
+  let parent = 'root'
+  for (const part of parts) {
+    const id = await findFolder(drive, part, parent)
+    if (!id) return null
+    parent = id
+  }
+  return parent
+}
+
+/** Lista as subpastas (categorias) dentro de parentId -> [{ id, name }]. */
+export async function listFolders(parentId) {
+  const drive = await getDrive()
+  const res = await drive.files.list({
+    q: `'${parentId}' in parents and trashed=false and mimeType='${FOLDER_MIME}'`,
+    fields: 'files(id,name)',
+    orderBy: 'name',
+    pageSize: 100,
+    spaces: 'drive',
+  })
+  return res.data.files || []
+}
+
+/** Lista arquivos (não-pastas) dentro de parentId; filtra por nome se nameContains. */
+export async function listFiles(parentId, { nameContains = '' } = {}) {
+  const drive = await getDrive()
+  const q = [`'${parentId}' in parents`, 'trashed=false', `mimeType != '${FOLDER_MIME}'`]
+  if (nameContains) q.push(`name contains '${escapeQuery(nameContains)}'`)
+  const res = await drive.files.list({
+    q: q.join(' and '),
+    fields: 'files(id,name,mimeType,size)',
+    orderBy: 'createdTime desc',
+    pageSize: 50,
+    spaces: 'drive',
+  })
+  return res.data.files || []
+}
+
+/** Baixa um arquivo do Drive pra um caminho local (streaming, aguenta vídeo grande). */
+export async function downloadFileToPath(id, destPath) {
+  const drive = await getDrive()
+  const res = await drive.files.get({ fileId: id, alt: 'media' }, { responseType: 'stream' })
+  await new Promise((resolve, reject) => {
+    const w = createWriteStream(destPath)
+    res.data.on('error', reject).pipe(w)
+    w.on('finish', resolve).on('error', reject)
+  })
+}
+
 let _rootShared = false
 /** Como ensureFolderPath, mas garante que a pasta RAIZ esteja compartilhada (link público). */
 export async function ensureArchivePath(parts) {
@@ -115,6 +167,12 @@ export async function uploadStream({ name, parentId, mimeType, stream }) {
     fields: 'id,webViewLink,size',
   })
   return res.data
+}
+
+/** Remove um arquivo/pasta (só o que o bot criou — escopo drive.file). */
+export async function deleteFile(id) {
+  const drive = await getDrive()
+  await drive.files.delete({ fileId: id })
 }
 
 /** Confere se o login está OK (usado no boot e no script de auth). */

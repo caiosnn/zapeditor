@@ -19,6 +19,7 @@ Bot assistente para grupos de WhatsApp com 3 funções, todas acionadas **marcan
 | **Corrigir legenda** | Responda com **CORREÇÃO** + a parte certa (`CORREÇÃO se → você`, ou o texto completo) → re-renderiza. |
 | **Cortar** | Depois de transcrever um vídeo, **responda a transcrição** com **CORTE** + início/fim (cole os blocos, números de bloco, ou tempos) → recebe o trecho. Depois pode legendar. |
 | **Baixar mídia** | Marque o bot num **link de YouTube, X, Instagram ou TikTok** (ou responda a um link + @bot) → recebe o vídeo/foto baixado. |
+| **Guardar edição** | Marque o bot num **vídeo** dizendo "esse é o *compilado/corte/bruto* tal" → guarda no Drive em pasta nomeada. Depois "*manda o compilado tal*" reenvia no grupo. |
 
 No **privado** os gatilhos por palavra-chave (CORREÇÃO, CORTE) e os links funcionam sem precisar marcar.
 
@@ -68,6 +69,7 @@ WHISPER_MODEL=small           # tiny|base|small|medium (faster-whisper)
 - `caption-edit.js` — parsing de correções (CORREÇÃO), formatação com timestamps
 - `cut.js` + `cut-store.js` — cortes (parse de trecho, ffmpeg, store em disco por ID da transcrição)
 - `downloader.js` — media downloader: `detectMediaUrl`/`parseInstagram` (acha link e tipo) + `downloadMedia` (yt-dlp p/ vídeo, instaloader p/ Instagram, gallery-dl p/ foto). IG público sai sem login; stories/privado via `npm run ig-login` (sessão persistente)
+- `edits.js` + `edits-nlu.js` — biblioteca de edições: guarda/recupera vídeos em pastas nomeadas no Drive (Compilados/Cortes/Brutos, ou livres), por comando em linguagem natural (IA)
 
 **Render da legenda (Remotion, `caption-studio/`):** clonado de `remotion-dev/template-tiktok`.
 - `src/CaptionedVideo/index.tsx` — composição (mantém resolução via `dims.json`), agrupa páginas, quebra por frase, máx 2 linhas
