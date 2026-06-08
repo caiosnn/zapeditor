@@ -98,6 +98,19 @@ export const config = {
     .split(',')
     .map((s) => s.replace(/\D/g, ''))
     .filter(Boolean),
+
+  // --- ElevenLabs (locução + música para o estúdio de vídeo) ---
+  elevenLabsApiKey: process.env.ELEVENLABS_API_KEY?.trim() || '',
+
+  // --- Synology NAS (baixar criações do servidor "gofile.me" = QuickConnect do NAS) ---
+  // Host resolvido do QuickConnect. Conta SEM 2FA (serviço) p/ login não-interativo.
+  synologyHost: process.env.SYNOLOGY_HOST?.trim() || '',
+  synologyUser: process.env.SYNOLOGY_USER?.trim() || '',
+  synologyPass: process.env.SYNOLOGY_PASS || '',
+
+  // --- Criações (baixar do NAS -> subir no Drive em Criações/<cliente>, recuperar por tema) ---
+  creationsEnabled: (process.env.CREATIONS_ENABLED?.trim() || 'true').toLowerCase() !== 'false',
+  creationsRootFolder: process.env.CREATIONS_FOLDER?.trim() || 'Criações',
 }
 
 if (!config.openRouterApiKey) {
