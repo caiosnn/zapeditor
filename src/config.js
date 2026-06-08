@@ -81,6 +81,12 @@ export const config = {
   // Pasta raiz no Drive onde tudo é organizado.
   archiveRootFolder: process.env.ARCHIVE_ROOT_FOLDER?.trim() || 'Edições WhatsApp',
 
+  // --- Biblioteca de edições (guardar/recuperar vídeos em pastas nomeadas no Drive) ---
+  // "esse é o compilado X" guarda o vídeo em Edições/Compilados/X.mp4; "manda o compilado X" recupera.
+  editsEnabled: (process.env.EDITS_ENABLED?.trim() || 'true').toLowerCase() !== 'false',
+  // Subpasta (dentro de ARCHIVE_ROOT_FOLDER) que agrupa as categorias de edição.
+  editsParentFolder: process.env.EDITS_FOLDER?.trim() || 'Edições',
+
   // --- Interface web (gestão do arquivamento por grupo) ---
   webEnabled: (process.env.WEB_ENABLED?.trim() || 'false').toLowerCase() === 'true',
   webPort: Number(process.env.WEB_PORT ?? 3333) || 3333,
@@ -92,6 +98,19 @@ export const config = {
     .split(',')
     .map((s) => s.replace(/\D/g, ''))
     .filter(Boolean),
+
+  // --- ElevenLabs (locução + música para o estúdio de vídeo) ---
+  elevenLabsApiKey: process.env.ELEVENLABS_API_KEY?.trim() || '',
+
+  // --- Synology NAS (baixar criações do servidor "gofile.me" = QuickConnect do NAS) ---
+  // Host resolvido do QuickConnect. Conta SEM 2FA (serviço) p/ login não-interativo.
+  synologyHost: process.env.SYNOLOGY_HOST?.trim() || '',
+  synologyUser: process.env.SYNOLOGY_USER?.trim() || '',
+  synologyPass: process.env.SYNOLOGY_PASS || '',
+
+  // --- Criações (baixar do NAS -> subir no Drive em Criações/<cliente>, recuperar por tema) ---
+  creationsEnabled: (process.env.CREATIONS_ENABLED?.trim() || 'true').toLowerCase() !== 'false',
+  creationsRootFolder: process.env.CREATIONS_FOLDER?.trim() || 'Criações',
 }
 
 if (!config.openRouterApiKey) {

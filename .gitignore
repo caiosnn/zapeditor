@@ -5,6 +5,15 @@ auth/
 data/
 qr.png
 
+# vault Obsidian (catálogo interno do cliente, links do Drive) e guia de marca — NÃO versionar no repo público
+vault/
+brand/
+
+# scripts descartáveis de exploração/teste do NAS
+scripts/synology-explore*.mjs
+scripts/test-find.mjs
+scripts/test-syno.mjs
+
 # artefatos de render / transientes
 caption-studio/public/input.mp4
 caption-studio/public/input.json

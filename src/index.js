@@ -23,11 +23,13 @@ import { consultExpert, isAffirmative, isNegative } from './expert.js'
 import { initExpertStore, appendHistory, setPrefs } from './expert-store.js'
 import { generateImage, generateVideo, estimateCost, downloadBuffer } from './higgsfield.js'
 import { classifyAttachment, archivePath, buildFileName, isDriveRequest, parseDriveDate, dayFolderName } from './archive.js'
-import { ensureArchivePath, uploadStream, folderLink } from './drive.js'
+import { ensureArchivePath, ensureFolderPath, findFolderPath, listFolders, listFiles, downloadFileToPath, uploadStream, folderLink } from './drive.js'
 import { initArchiveStore, wasArchived, markArchived } from './archive-store.js'
 import { initSettings, isGroupArchived, getArchiveEnabled, setGroupArchived } from './settings.js'
 import { startWeb } from './web.js'
 import { interpretArchiveCommand } from './archive-nlu.js'
+import { interpretEditCommand } from './edits-nlu.js'
+import { normalizeCategory, sanitizeName, matchFiles } from './edits.js'
 import { detectMediaUrl, downloadMedia } from './downloader.js'
 import {
   getMedia,
@@ -174,7 +176,8 @@ async function handleMessage(sock, msg) {
       await handleAdminToggle(sock, jid, msg, pend, parseInt(text, 10))
       return
     }
-    if (/grupo|arquiv|salv/i.test(text)) {
+    // (não intercepta comandos de EDIÇÃO — "salva/arquiva esse como compilado/corte/bruto")
+    if (/grupo|arquiv|salv/i.test(text) && !/\b(compilad\w*|cortes?|brutos?|edi[çc]\w*)\b/i.test(text)) {
       await handleAdminCommand(sock, jid, msg, isGroup(jid) ? jid : null)
       return
     }
@@ -213,11 +216,12 @@ async function handleMessage(sock, msg) {
     }
   }
 
-  // 3) CORTE: responder à transcrição + palavra "corte".
+  // 3) CORTE: responder à transcrição + palavra "corte" + um trecho válido (início/fim).
+  //    (sem trecho válido, deixa seguir — pode ser "manda o corte X" da biblioteca de edições)
   if (!ownMedia && /\bcorte\b|\bcortar\b/i.test(text)) {
     const quotedId = getContextInfo(msg.message)?.stanzaId
     const cut = getCut(quotedId) || getCut(senderLatestCut.get(key))
-    if (cut) {
+    if (cut && parseCutRange(text, cut.blocks)) {
       await handleCut(sock, jid, msg, cut)
       return
     }
@@ -238,6 +242,24 @@ async function handleMessage(sock, msg) {
       await handleDownload(sock, jid, msg, hit)
       return
     }
+  }
+
+  // 3.7) BIBLIOTECA DE EDIÇÕES: guardar vídeo numa pasta nomeada (Compilados/Cortes/Brutos/...)
+  //      ou recuperar/listar — em linguagem natural. Pré-filtro por palavra-chave; a IA decide.
+  if (
+    config.editsEnabled &&
+    getArchiveEnabled() &&
+    directed &&
+    /\b(compilad\w*|cortes?|clipe?s?|brutos?|raw|edi[çc]\w*|guard\w*|salv\w*|arquiv\w*|biblioteca)\b/i.test(text)
+  ) {
+    const ctx = getContextInfo(msg.message)
+    const editTarget =
+      ownMedia?.kind === 'video'
+        ? msg
+        : getMedia(ctx?.quotedMessage)?.kind === 'video'
+          ? rebuildTarget(jid, ctx, botIds)
+          : null
+    if (await handleEdits(sock, jid, msg, { text, editTarget })) return
   }
 
   // 4) Resolve áudio/vídeo-alvo (na própria msg ou citada) p/ TRANSCRIÇÃO/LEGENDA.
@@ -511,6 +533,166 @@ function downloadErrorMessage(err, hit) {
   if (m === 'NO_MEDIA') return `🤔 Não achei vídeo nem foto baixável nesse link do *${hit.platform}*.`
   if (/não encontrado/i.test(m)) return `❌ ${m}`
   return `❌ Não consegui baixar do *${hit.platform}* agora. Tenta de novo daqui a pouco.`
+}
+
+// ---- Biblioteca de edições (guardar/recuperar vídeos em pastas nomeadas no Drive) ----
+
+/** Caminho de pastas de uma categoria: [raiz, "Edições", Categoria]. */
+function editPathParts(category) {
+  return [config.archiveRootFolder, config.editsParentFolder, category]
+}
+
+/** Categorias (subpastas de Edições) que já existem no Drive. */
+async function listEditCategories() {
+  const parent = await findFolderPath([config.archiveRootFolder, config.editsParentFolder])
+  if (!parent) return []
+  return (await listFolders(parent)).map((f) => f.name)
+}
+
+/** Carimbo curto p/ nome de arquivo quando o usuário não dá um nome. */
+function stampName() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getDate())}-${p(d.getMonth() + 1)} ${p(d.getHours())}h${p(d.getMinutes())}`
+}
+
+/** Roteia os comandos da biblioteca de edições. Retorna true se tratou (senão deixa o fluxo seguir). */
+async function handleEdits(sock, jid, msg, { text, editTarget }) {
+  const hasVideo = !!editTarget
+  let categories = []
+  try {
+    categories = await listEditCategories()
+  } catch {
+    /* Drive ainda vazio/sem login: segue sem o contexto */
+  }
+  let intent
+  try {
+    intent = await interpretEditCommand({ text, hasVideo, categories })
+  } catch (e) {
+    console.error('NLU de edições falhou:', e?.message || e)
+    return false
+  }
+  if (intent.intent === 'save') {
+    await doSaveEdit(sock, jid, msg, editTarget, intent)
+    return true
+  }
+  if (intent.intent === 'fetch') {
+    await doFetchEdit(sock, jid, msg, intent)
+    return true
+  }
+  if (intent.intent === 'list') {
+    await doListEdits(sock, jid, msg, intent)
+    return true
+  }
+  return false
+}
+
+/** Guarda o vídeo na pasta da categoria, com o nome dado (cria a pasta se não existir). */
+async function doSaveEdit(sock, jid, requestMsg, editTarget, intent) {
+  if (!editTarget) {
+    await sock
+      .sendMessage(jid, { text: '📁 Pra guardar, *responda o vídeo* dizendo a categoria. Ex: "esse é o *compilado* da campanha".' }, { quoted: requestMsg })
+      .catch(() => {})
+    return true
+  }
+  const category = normalizeCategory(intent.category) || 'Brutos'
+  const name = sanitizeName(intent.name) || stampName()
+  const dlId = editTarget.key?.id
+  if (dlId && wasArchived(`edit:${dlId}`)) return true // reentrega do WhatsApp: já guardamos
+
+  await sock.sendMessage(jid, { react: { text: '📁', key: requestMsg.key } }).catch(() => {})
+  try {
+    const dlTarget = { key: editTarget.key, message: unwrap(editTarget.message) }
+    const stream = await downloadMediaMessage(dlTarget, 'stream', {}, { logger, reqMediaUpload: sock.updateMediaMessage })
+    const folderId = await ensureFolderPath(editPathParts(category))
+    await uploadStream({ name: `${name}.mp4`, parentId: folderId, mimeType: 'video/mp4', stream })
+    if (dlId) await markArchived(`edit:${dlId}`)
+    await sock.sendMessage(jid, { react: { text: '✅', key: requestMsg.key } }).catch(() => {})
+    await sock
+      .sendMessage(jid, { text: `✅ Guardei em *${category}* como *${name}*.\nPra pegar depois: "_manda o ${category.toLowerCase().replace(/s$/, '')} ${name}_".` }, { quoted: requestMsg })
+      .catch(() => {})
+  } catch (e) {
+    console.error('Falha ao guardar edição:', e?.message || e)
+    await sock.sendMessage(jid, { react: { text: '❌', key: requestMsg.key } }).catch(() => {})
+    await sock
+      .sendMessage(jid, { text: '❌ Não consegui guardar. O Drive está conectado? (login: `npm run drive-auth`)' }, { quoted: requestMsg })
+      .catch(() => {})
+  }
+  return true
+}
+
+/** Recupera vídeo(s) de uma categoria pelo nome e reenvia no chat. */
+async function doFetchEdit(sock, jid, msg, intent) {
+  const category = normalizeCategory(intent.category)
+  if (!category) {
+    await sock.sendMessage(jid, { text: '🤔 De qual pasta? Ex: "manda o *compilado* da campanha".' }, { quoted: msg }).catch(() => {})
+    return true
+  }
+  await sock.sendMessage(jid, { react: { text: '🔎', key: msg.key } }).catch(() => {})
+  try {
+    const parent = await findFolderPath(editPathParts(category))
+    const all = parent ? await listFiles(parent) : []
+    if (!all.length) {
+      await sock.sendMessage(jid, { text: `📂 Ainda não tem nada em *${category}*.` }, { quoted: msg }).catch(() => {})
+      return true
+    }
+    const names = all.map((f) => f.name)
+    const matched = intent.name ? matchFiles(names, intent.name) : names
+    let hits = all.filter((f) => matched.includes(f.name))
+    if (!hits.length) {
+      const lista = all.slice(0, 10).map((f) => `• ${stripExt(f.name)}`).join('\n')
+      await sock
+        .sendMessage(jid, { text: `🤔 Não achei "*${intent.name}*" em *${category}*.\n\nTem isso aqui:\n${lista}` }, { quoted: msg })
+        .catch(() => {})
+      await sock.sendMessage(jid, { react: { text: '🤔', key: msg.key } }).catch(() => {})
+      return true
+    }
+    hits = hits.slice(0, 3) // evita despejar a pasta inteira de uma vez
+    for (const f of hits) {
+      const tmp = join(tmpdir(), `edit_${Date.now()}_${Math.floor(Math.random() * 1e6)}.mp4`)
+      try {
+        await downloadFileToPath(f.id, tmp)
+        const buffer = await readFile(tmp)
+        await sendMediaDual(sock, jid, { kind: 'video', buffer, caption: `📁 ${category}: ${stripExt(f.name)}`, baseName: stripExt(f.name), quoted: msg })
+      } finally {
+        await rm(tmp, { force: true }).catch(() => {})
+      }
+    }
+    await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
+  } catch (e) {
+    console.error('Falha ao recuperar edição:', e?.message || e)
+    await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }).catch(() => {})
+    await sock.sendMessage(jid, { text: '❌ Não consegui buscar agora. Tenta de novo daqui a pouco.' }, { quoted: msg }).catch(() => {})
+  }
+  return true
+}
+
+/** Lista o conteúdo de uma categoria (ou as categorias, se nenhuma for dita). */
+async function doListEdits(sock, jid, msg, intent) {
+  const category = normalizeCategory(intent.category)
+  try {
+    if (!category) {
+      const cats = await listEditCategories()
+      const txt = cats.length ? '📂 *Pastas de edição:*\n' + cats.map((c) => `• ${c}`).join('\n') : '📂 Ainda não guardei nenhuma edição.'
+      await sock.sendMessage(jid, { text: txt }, { quoted: msg }).catch(() => {})
+      return true
+    }
+    const parent = await findFolderPath(editPathParts(category))
+    const files = parent ? await listFiles(parent) : []
+    const txt = files.length
+      ? `📂 *${category}* (${files.length}):\n` + files.slice(0, 30).map((f) => `• ${stripExt(f.name)}`).join('\n')
+      : `📂 Nada em *${category}* ainda.`
+    await sock.sendMessage(jid, { text: txt }, { quoted: msg }).catch(() => {})
+  } catch (e) {
+    console.error('Falha ao listar edições:', e?.message || e)
+    await sock.sendMessage(jid, { text: '❌ Não consegui listar agora.' }, { quoted: msg }).catch(() => {})
+  }
+  return true
+}
+
+/** Remove a extensão do nome do arquivo (pra exibir/legendar). */
+function stripExt(name) {
+  return String(name || '').replace(/\.[^./\\]+$/, '')
 }
 
 /** Reconstrói a mensagem citada (com mídia) para conseguir baixá-la. */
